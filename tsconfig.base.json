@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+
+    /* Strictness. These are the project's non-negotiables: `strict` and
+       `noUncheckedIndexedAccess` are both required by the plan, and no `any`
+       is allowed in src/shared or src/main (enforced by eslint). */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    "noEmit": true
+  }
+}
