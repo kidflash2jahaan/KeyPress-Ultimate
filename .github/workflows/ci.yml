@@ -1,0 +1,106 @@
+# .github/workflows/ci.yml
+#
+# Every push and every pull request: typecheck, lint and the full test suite on
+# both platforms we ship. There is no ubuntu job: we do not ship a Linux build,
+# and the two things most likely to break (koffi's native load and the
+# platform-specific injector) only exist on macOS and Windows.
+#
+# This workflow does NOT package anything. Packaging, signing and the koffi
+# universal-binary gate live in release.yml.
+
+name: CI
+
+on:
+  push:
+    # Naming `branches` at all means tag pushes never match this workflow, which
+    # is what we want: a v* tag is release.yml's job, not CI's.
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same branch/PR makes the in-flight run pointless.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Node 20 is the floor declared in package.json engines. setup-node resolves
+  # this to the latest 20.x, which is >= 20.19 and therefore satisfies Vite 7
+  # and ESLint 10.
+  NODE_VERSION: "20"
+
+jobs:
+  check:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false # one platform failing should not hide the other's result
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS
+          - os: windows-latest
+            label: Windows
+
+    steps:
+      # Pinned majors, all verified current on 2026-09-09:
+      #   actions/checkout v7.0.1, actions/setup-node v7.0.0
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # -----------------------------------------------------------------------
+      # koffi's native binary is a separate package per platform+arch
+      # (@koromix/koffi-darwin-arm64, -darwin-x64, -win32-x64), each pinned with
+      # "os" and "cpu" in its package.json. npm normally refuses to install the
+      # foreign-arch ones with EBADPLATFORM; the repo's .npmrc sets force=true so
+      # they all install anyway.
+      #
+      # This step exists because that is easy to silently lose: any npm command
+      # re-reconciles node_modules, and one bad interaction leaves the runner
+      # without the binary the tests load. Better to fail here with a clear
+      # message than inside a vitest stack trace.
+      # -----------------------------------------------------------------------
+      - name: Assert the koffi native binary for this runner is installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            macOS)   PKGS="darwin-arm64 darwin-x64" ;;
+            Windows) PKGS="win32-x64" ;;
+            *) echo "unexpected runner: $RUNNER_OS"; exit 1 ;;
+          esac
+          MISSING=0
+          for P in $PKGS; do
+            DIR="node_modules/@koromix/koffi-$P"
+            SLICE="$DIR/$(echo "$P" | tr '-' '_')"
+            if [ -f "$SLICE/koffi.node" ]; then
+              echo "ok  $SLICE/koffi.node"
+            else
+              echo "MISSING $SLICE/koffi.node"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" = "1" ]; then
+            echo "::error::npm did not install a required @koromix/koffi-* prebuild. Check that .npmrc still sets force=true."
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test

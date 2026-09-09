@@ -1,0 +1,163 @@
+# electron-builder.yml for KeyPress Ultimate
+#
+# Verified against electron-builder 26.15.3 + Electron 44.3.0 + koffi 3.2.1 on
+# macOS 26.6 arm64: the mac half was actually built with
+# `npx electron-builder --mac --dir` and the output inspected by
+# scripts/verify-package.mjs (universal binary, both koffi arch slices present,
+# signature valid, no sandbox entitlement). The Windows half is config-verified
+# against the v26 JSON schema, not built (no Windows machine available).
+#
+# Release flow, signing and the secrets involved: docs/release-process.md
+
+appId: com.keypressultimate.app
+productName: KeyPress Ultimate
+copyright: Copyright © 2026 Jahaan Pardhanani
+
+directories:
+  output: dist
+  buildResources: build
+
+# We prebuild main/preload/renderer with Vite; nothing needs node-gyp because
+# koffi ships prebuilt Node-API binaries. Leaving npmRebuild on would make
+# electron-builder try to rebuild native modules for Electron's ABI, which is
+# both unnecessary and a reliable source of CI failures.
+npmRebuild: false
+
+asar: true
+
+files:
+  - "out/**" # vite build output (main.js, preload.js, renderer/)
+  - "package.json"
+  - "!**/*.map"
+  - "!**/node_modules/**/{test,__tests__,tests,doc,docs,example,examples}/**"
+
+# koffi resolves its native module at runtime with
+#   fs.existsSync(`${__dirname}/../../../@koromix/koffi-${platform}-${arch}`)
+#   -> require(thatPath)
+# (koffi/src/koffi/index.cjs, loadDynamic()). require() cannot load a .node from
+# inside an asar, and the path is computed relative to koffi's own __dirname, so
+# BOTH koffi and @koromix/* must be unpacked.
+asarUnpack:
+  - "node_modules/koffi/**"
+  - "node_modules/@koromix/**"
+
+# ---------------------------------------------------------------------------
+mac:
+  category: public.app-category.utilities
+  icon: build/icon.icns
+
+  # DEFAULT = ad-hoc ("-"). This is the graceful-degradation path and it is
+  # deliberately the default so that a local build, a fork, or a release run
+  # with no MAC_CERT_P12 secret still produces a properly sealed bundle.
+  #
+  # Do NOT use `identity: null` (skips signing entirely): an unsigned bundle
+  # reports "code object is not signed at all", and on Apple Silicon macOS shows
+  # "app is damaged" instead of the normal Gatekeeper prompt.
+  #
+  # Do NOT leave this unset either: with no identity and no certificate in the
+  # keychain, electron-builder 26 skips signing with a warning rather than
+  # falling back to ad-hoc (see MacConfiguration.identity in the schema), which
+  # is the same "app is damaged" outcome.
+  #
+  # The release workflow OVERRIDES this with
+  #   -c.mac.identity="$SIGN_IDENTITY"
+  # when the self-signed certificate secret is present. That is the case that
+  # matters: an ad-hoc signature's designated requirement is a per-build cdhash,
+  # so every update looks like a different program and macOS drops the
+  # Accessibility grant. A fixed certificate gives a stable DR of the form
+  #   identifier "com.keypressultimate.app" and certificate leaf = H"<sha1>"
+  # which survives updates. See docs/release-process.md.
+  identity: "-"
+
+  # Ad-hoc + hardenedRuntime enforces library validation, which rejects the
+  # pre-signed Electron framework. Hardened runtime also buys nothing without
+  # notarization, and we do not notarize (no paid Apple Developer account).
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  darkModeSupport: true
+
+  # Explicit rather than relying on buildResources auto-discovery, because what
+  # is NOT in this file is load-bearing: com.apple.security.app-sandbox must
+  # never appear. The sandbox silently no-ops CGEventPost, so a sandboxed build
+  # launches, looks healthy, and posts no events at all.
+  entitlements: build/entitlements.mac.plist
+
+  extendInfo:
+    # App Nap throttles timers in a process whose windows are all occluded,
+    # which is exactly our steady state, since the user is in a fullscreen game
+    # while we hold keys down. Without this the repeat interval drifts from
+    # 33ms to whole seconds.
+    LSAppNapIsDisabled: true
+    NSHumanReadableCopyright: Copyright © 2026 Jahaan Pardhanani
+
+  # @electron/universal refuses to merge a Mach-O file that is byte-identical in
+  # the x64 and arm64 packs, because it cannot tell which arch it belongs to.
+  # Both @koromix/koffi-darwin-{x64,arm64} are present in both packs, so both
+  # koffi.node files hit that check. Whitelisting them keeps each single-arch
+  # binary as-is; koffi then picks the right one at runtime from process.arch.
+  # Without this the build fails with:
+  #   Detected file ".../koffi-darwin-arm64/darwin_arm64/koffi.node" that's the
+  #   same in both x64 and arm64 builds and not covered by the x64ArchFiles rule
+  x64ArchFiles: "**/koffi.node"
+
+  # -> KeyPress-Ultimate-1.2.3-universal-mac.zip (dmg overrides this below).
+  # The updater matches asset names literally, so keep these in sync with it.
+  artifactName: "KeyPress-Ultimate-${version}-${arch}-mac.${ext}"
+  target:
+    - target: dmg
+      arch: [universal]
+    - target: zip # the in-app updater's payload
+      arch: [universal]
+
+dmg:
+  title: "KeyPress Ultimate ${version}"
+  artifactName: "KeyPress-Ultimate-${version}-universal.${ext}"
+  contents:
+    - { x: 140, y: 180, type: file }
+    - { x: 400, y: 180, type: link, path: "/Applications" }
+
+# ---------------------------------------------------------------------------
+win:
+  icon: build/icon.ico
+  # No signtoolOptions block at all: nothing to sign with, and leaving
+  # signtoolOptions.publisherName unset also keeps `publisherName` out of
+  # app-update.yml (relevant only if you ever switch back to electron-updater).
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  # arm64 is deliberately not built: Windows on ARM runs x64 processes under
+  # emulation, SendInput/GetForegroundWindow work normally there, and building
+  # it would need the same cross-arch koffi tarball dance as macOS.
+
+nsis:
+  # oneClick:false gives the user a real installer with a destination page.
+  # perMachine:false + allowElevation:false keeps the install under
+  # %LOCALAPPDATA%\Programs with NO UAC prompt at any point, which is what lets
+  # the updater run `installer.exe /S --force-run` silently later. An assisted
+  # NSIS installer still honours /S and reuses the recorded install directory.
+  # The accepted flags are generated in NsisTarget.js:
+  #   --updated --force-run --keep-shortcuts --no-desktop-shortcut
+  #   --delete-app-data --allusers --currentuser   (plus NSIS's /S and /D=)
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  runAfterFinish: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+  # We verify downloads with SHA-256 ourselves; no need for blockmap sidecars.
+  differentialPackage: false
+  artifactName: "KeyPress-Ultimate-Setup-${version}-${arch}.${ext}"
+
+portable:
+  artifactName: "KeyPress-Ultimate-${version}-${arch}-portable.${ext}"
+
+# ---------------------------------------------------------------------------
+# No `publish:` block. The release workflow uploads assets with
+# softprops/action-gh-release, and the in-app updater reads the GitHub Releases
+# API directly, so electron-builder never needs a GH_TOKEN and never generates
+# latest.yml / latest-mac.yml.
+publish: null

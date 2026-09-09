@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  KeyPress Ultimate, macOS entitlements.
+
+  READ THIS BEFORE ADDING A KEY.
+
+  com.apple.security.app-sandbox MUST NEVER APPEAR IN THIS FILE.
+  The App Sandbox silently no-ops CGEventPost: the call returns without error,
+  no event reaches the window server, and the app looks completely healthy while
+  doing nothing at all. There is no diagnostic. A sandboxed build is a build
+  that ships broken, so the absence of that key is the single most important
+  thing here, and scripts/verify-package.mjs fails the build if it reappears.
+
+  Everything below is a com.apple.security.cs.* key, and every one of those is
+  only enforced when the Hardened Runtime is on. We ship with
+  `mac.hardenedRuntime: false` (we do not notarize, and hardened runtime plus a
+  non-Apple signature enforces library validation, which rejects the pre-signed
+  Electron framework). They are declared anyway so that turning hardened runtime
+  on later (if this ever gets a paid Apple Developer ID and notarization) does
+  not immediately break V8 and the framework load.
+
+  No com.apple.security.automation.apple-events either: we read the frontmost
+  application through NSWorkspace/CGWindowList, not through AppleScript, so no
+  automation consent is required. Accessibility (AXIsProcessTrusted) is a TCC
+  grant made by the user in System Settings, not an entitlement. Nothing in
+  this file can request it, and nothing in this file can bypass it.
+-->
+<plist version="1.0">
+<dict>
+    <!-- V8 writes and then executes JIT pages. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- Electron's older codegen paths still need W^X to be relaxed. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- ELECTRON_RUN_AS_NODE and friends are read at launch. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- Our signature is not Apple's, so library validation would refuse to
+         load Electron Framework.framework, which Apple signed. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
