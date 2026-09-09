@@ -257,7 +257,13 @@ describe('createScheduler', () => {
       // test does not do), and a shared macOS runner adds its own stalls. So
       // jitter is bounded loosely and only drift is bounded tightly.
       expect(errors).toHaveLength(TICKS)
-      expect(totalDriftMs, summary).toBeLessThan(PERIOD_MS)
+      // One period is the right bound on real hardware. On a CI runner the
+      // LAST tick alone can land a full timer quantum late (~15.6ms on Windows)
+      // with zero accumulated drift, so the bound there is three periods: still
+      // a wide margin under the ~270ms a recursive setTimeout(period) produces
+      // over these same 300 ticks, which is the bug being guarded against.
+      const driftBudgetMs = PERIOD_MS * (process.env.CI ? 3 : 1)
+      expect(totalDriftMs, summary).toBeLessThan(driftBudgetMs)
       expect(mean, summary).toBeLessThan(process.env.CI ? 20 : 1)
       expect(p99, summary).toBeLessThan(process.env.CI ? 60 : 1)
     },
