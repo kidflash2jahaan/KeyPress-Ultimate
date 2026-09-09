@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, type Mock } from 'vitest'
+import path from 'node:path'
 import {
   buildReplayPlan,
   HoldJournal,
@@ -12,8 +13,12 @@ import {
   type ReplayPlan,
 } from './journal'
 
-const DIR = '/userData'
-const FINAL = `${DIR}/${JOURNAL_FILENAME}`
+// The fake fs records ops as strings built from whatever path the code under
+// test produced, and that code uses node:path.join. Building the expected
+// strings by hand with '/' therefore misses on Windows, where join yields '\\'.
+// Use join here too so the assertions are about ordering, not separators.
+const DIR = path.join(path.sep, 'userData')
+const FINAL = path.join(DIR, JOURNAL_FILENAME)
 const TMP = `${FINAL}.tmp`
 
 /**

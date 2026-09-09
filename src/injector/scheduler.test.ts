@@ -212,6 +212,7 @@ describe('createScheduler', () => {
       const TICKS = 300
       const PERIOD_MS = 25
       const errors: number[] = []
+      const startedAt = realClock.now()
 
       await new Promise<void>((resolve) => {
         const scheduler: Scheduler = createScheduler({
@@ -227,6 +228,12 @@ describe('createScheduler', () => {
         scheduler.start()
       })
 
+      // Accumulated drift: how far the 300th tick landed from where the
+      // schedule said it should, in total. A drifting scheduler blows this up
+      // linearly; an absolute-deadline one keeps it inside a single period.
+      const elapsed = realClock.now() - startedAt
+      const totalDriftMs = Math.abs(elapsed - TICKS * PERIOD_MS)
+
       const p99 = percentile(errors, 0.99)
       const mean = errors.reduce((a, b) => a + b, 0) / errors.length
       const max = Math.max(...errors)
@@ -234,19 +241,25 @@ describe('createScheduler', () => {
       // Surfaced on failure so a flake reads as a number, not a mystery.
       const summary = `mean=${mean.toFixed(3)}ms p50=${percentile(errors, 0.5).toFixed(
         3,
-      )}ms p95=${percentile(errors, 0.95).toFixed(3)}ms p99=${p99.toFixed(3)}ms max=${max.toFixed(3)}ms`
+      )}ms p95=${percentile(errors, 0.95).toFixed(3)}ms p99=${p99.toFixed(3)}ms max=${max.toFixed(3)}ms drift=${totalDriftMs.toFixed(1)}ms`
 
       expect(errors).toHaveLength(TICKS)
       expect(errors.every((error) => error > -1)).toBe(true)
-      // Drift is the property under test, and mean/p50 measure it robustly:
-      // a scheduler that drifts pushes every sample out, not just the tail.
-      // The p99 tail measures the host's scheduling jitter as much as ours, and
-      // a shared CI runner cannot promise sub-millisecond wakeups (observed
-      // p99=3.2ms there against p99<1ms on real hardware), so the tail bound is
-      // relaxed on CI rather than deleted.
-      expect(mean, summary).toBeLessThan(1)
-      expect(percentile(errors, 0.5), summary).toBeLessThan(1)
-      expect(p99, summary).toBeLessThan(process.env.CI ? 12 : 1)
+      // What this test is really for is DRIFT: the bug it guards against is
+      // recursive setTimeout(period), which accumulates error tick over tick
+      // (+140ms over six seconds at a 20ms period). Absolute-deadline
+      // scheduling does not accumulate, and that property holds no matter how
+      // coarse the host's timer is.
+      //
+      // Per-tick jitter, by contrast, is mostly the host's. A Windows CI runner
+      // defaults to ~15.6ms timer granularity (which is exactly why the
+      // injector calls timeBeginPeriod(1) in production, something this bare
+      // test does not do), and a shared macOS runner adds its own stalls. So
+      // jitter is bounded loosely and only drift is bounded tightly.
+      expect(errors).toHaveLength(TICKS)
+      expect(totalDriftMs, summary).toBeLessThan(PERIOD_MS)
+      expect(mean, summary).toBeLessThan(process.env.CI ? 20 : 1)
+      expect(p99, summary).toBeLessThan(process.env.CI ? 60 : 1)
     },
     30_000,
   )
