@@ -1,0 +1,102 @@
+/*
+ * The shell: a fixed title band, a scrolling instrument area, and a fixed
+ * action bar. Only the middle moves.
+ */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+/*
+ * The plate edge.
+ *
+ * The border is always 2px and always present, so nothing reflows when the
+ * phase changes. Idle is transparent, armed-waiting is dashed, firing is
+ * solid amber. Dash versus solid is a shape difference, so the three states
+ * stay apart without relying on hue.
+ */
+.main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 2px solid transparent;
+  transition:
+    border-color var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
+}
+
+.shell[data-phase='armed-waiting'] .main {
+  border-style: dashed;
+  border-color: var(--line-strong);
+}
+
+.shell[data-phase='firing'] .main {
+  border-style: solid;
+  border-color: var(--sig);
+  box-shadow: inset 0 0 20px -14px var(--sig-glow);
+}
+
+.shell[data-phase='blocked'] .main,
+.shell[data-phase='error'] .main {
+  border-style: solid;
+  border-color: var(--danger);
+}
+
+/* --- keyboard band -------------------------------------------------------- */
+
+.board {
+  padding: 16px 20px 4px;
+  min-width: 0;
+}
+
+.bandLabel {
+  margin: 0 0 8px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.boardArea {
+  min-width: 0;
+}
+
+/* --- mouse and mode ------------------------------------------------------- */
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(320px, auto) minmax(0, 1fr);
+  align-items: start;
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+}
+
+.split > * + * {
+  border-left: 1px solid var(--line);
+}
+
+@media (max-width: 1100px) {
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .split > * + * {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .main {
+    transition-duration: 1ms;
+  }
+}

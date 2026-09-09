@@ -1,0 +1,42 @@
+/* ============================================================================
+   KeyPress Ultimate - typefaces
+
+   Geist Sans and Geist Mono only. Both are SIL Open Font License 1.1
+   (c) 2023 Vercel, in collaboration with basement.studio. The licence ships
+   beside the binaries at ../assets/fonts/OFL.txt and must stay there: the OFL
+   requires the licence to travel with the font files, including inside the
+   packaged installer.
+
+   Fontshare families (Satoshi, General Sans, Clash Display) are BANNED in this
+   project. Their licence forbids redistribution in a public repository or an
+   installer, which is exactly what this app does. Do not add one, whatever a
+   style guide suggests.
+
+   Both faces are the VARIABLE builds, one file each, weight axis 100..900. Two
+   files cover every weight the UI will ever ask for, which matters when the
+   whole renderer has to paint before the first frame of a session.
+
+   font-display: block, not swap, on purpose. These are local files that decode
+   in a frame or two, so the block period is invisible - and a swap would
+   reflow every key legend on a 104-key board mid-paint. Blocking briefly beats
+   a board that visibly resets.
+
+   No local() source. The vendored file is the only acceptable build; a Geist
+   the user happens to have installed could be any version.
+   ============================================================================ */
+
+@font-face {
+  font-family: 'Geist';
+  src: url('../assets/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('../assets/fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+}

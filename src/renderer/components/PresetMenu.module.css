@@ -1,0 +1,265 @@
+.root {
+  position: relative;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 190px;
+  height: 28px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-1);
+  background: var(--cap);
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: default;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.triggerLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .trigger:hover {
+    color: var(--text);
+    border-color: var(--line-strong);
+  }
+}
+
+.trigger:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  width: 320px;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-2);
+  background: var(--bg-raised);
+  box-shadow: 0 12px 32px -8px rgb(0 0 0 / 0.45);
+  transform-origin: top right;
+  animation: menu-in var(--dur-fast) var(--ease-out);
+}
+
+/*
+ * Enter only. This is a transition-shaped keyframe (it plays once on mount and
+ * never repeats), which is why the "one looping animation" rule is intact.
+ */
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(-3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu {
+    animation: none;
+  }
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--radius-1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .row:hover {
+    background: var(--plate);
+  }
+}
+
+.pick {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 6px;
+  border: 0;
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: default;
+}
+
+.pick:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -2px;
+}
+
+.tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  color: var(--text);
+}
+
+.name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rowAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: default;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .rowAction:hover {
+    color: var(--text);
+    background: var(--cap);
+  }
+}
+
+.rowAction:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -2px;
+}
+
+.empty {
+  margin: 0;
+  padding: 12px 10px;
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.renameForm,
+.saveRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px;
+}
+
+.saveForm {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.saveLabel {
+  display: block;
+  padding: 0 6px;
+  color: var(--text-faint);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-1);
+  background: var(--plate);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+}
+
+.input::placeholder {
+  color: var(--text-faint);
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -1px;
+}
+
+.textButton {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-1);
+  background: var(--cap);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: default;
+}
+
+.textButton:disabled {
+  color: var(--text-faint);
+  border-color: var(--line);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .textButton:not(:disabled):hover {
+    background: var(--cap-top);
+  }
+}
+
+.textButton:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

@@ -1,0 +1,189 @@
+/*
+ * The top band. Frameless, so the whole bar is a drag handle and every
+ * interactive child opts back out.
+ */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: var(--titlebar-height);
+  padding: 0 10px 0 16px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+  flex: 0 0 auto;
+}
+
+/* macOS puts its traffic lights at the top left of the content area. */
+.trafficLightInset {
+  width: var(--titlebar-lights-inset);
+  flex: 0 0 auto;
+}
+
+.wordmark {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 550;
+  letter-spacing: -0.012em;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/* --- the one global state indicator ------------------------------------- */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 3px 10px 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-3);
+  background: var(--plate);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.005em;
+  color: var(--text-dim);
+  white-space: nowrap;
+  transition:
+    border-color var(--dur-base) var(--ease-out),
+    color var(--dur-base) var(--ease-out),
+    background-color var(--dur-base) var(--ease-out);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  transition:
+    background-color var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
+}
+
+/* Armed but not firing. Dashed ring, no fill: the state is real, and nothing
+   is flowing yet. Static, because motion belongs to the firing state alone. */
+.pill[data-phase='armed-waiting'] {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.pill[data-phase='armed-waiting'] .dot {
+  border-style: dashed;
+  border-color: var(--text-dim);
+}
+
+.pill[data-phase='firing'] {
+  border-color: var(--sig);
+  color: var(--sig);
+}
+
+.pill[data-phase='firing'] .dot {
+  background: var(--sig);
+  border-color: var(--sig);
+  box-shadow: 0 0 0 3px var(--sig-glow);
+  /*
+   * THE ONE LOOP. This is the only `animation` declaration in the renderer.
+   * It runs on a 7px dot, only while current is actually flowing, and it stops
+   * the moment the phase changes.
+   */
+  animation: signal-pulse 1.4s var(--ease-out) infinite;
+}
+
+.pill[data-phase='blocked'],
+.pill[data-phase='error'] {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.pill[data-phase='blocked'] .dot,
+.pill[data-phase='error'] .dot {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+@keyframes signal-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.86);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pill[data-phase='firing'] .dot {
+    animation: none;
+  }
+  .pill,
+  .dot {
+    transition-duration: 1ms;
+  }
+}
+
+/* --- right-hand controls ------------------------------------------------- */
+
+.right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: default;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .iconButton:hover {
+    background: var(--cap);
+    color: var(--text);
+  }
+}
+
+.iconButton:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.iconButton:active {
+  background: var(--cap-top);
+}
+
+.windowControls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 6px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .closeButton:hover {
+    background: var(--danger);
+    color: var(--sel-text);
+  }
+}

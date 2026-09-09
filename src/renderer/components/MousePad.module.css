@@ -1,0 +1,269 @@
+.pad {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  min-width: 0;
+}
+
+.heading {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.body {
+  display: flex;
+  align-items: flex-start;
+  gap: 22px;
+  min-width: 0;
+}
+
+.subheading {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* --- the mouse ----------------------------------------------------------- */
+
+.mouse {
+  position: relative;
+  flex: 0 0 auto;
+  width: 118px;
+  height: 186px;
+  border: 1px solid var(--cap-edge);
+  border-radius: 59px 59px 44px 44px;
+  background: linear-gradient(180deg, var(--cap-top) 0%, var(--cap) 46%, var(--plate) 100%);
+  box-shadow:
+    inset 0 1px 0 var(--cap-top),
+    0 6px 14px -8px rgb(0 0 0 / 0.55);
+}
+
+/* The moulding line between the two main buttons. */
+.seam {
+  position: absolute;
+  left: 50%;
+  top: 6px;
+  width: 1px;
+  height: 42%;
+  background: var(--cap-edge);
+  transform: translateX(-0.5px);
+}
+
+.region {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-faint);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  cursor: default;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.regionLabel {
+  pointer-events: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .region:hover {
+    color: var(--text);
+    background: var(--cap-top);
+  }
+}
+
+.region:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -2px;
+  z-index: 2;
+}
+
+/* Selected: neutral fill, static, no motion. */
+.region[aria-pressed='true'] {
+  background: var(--sel);
+  border-color: var(--sel-edge);
+  color: var(--sel-text);
+}
+
+/* Firing: amber, plus the same press geometry the keycaps use, so the state
+   survives deuteranopia without relying on the hue. */
+.region[data-firing='true'] {
+  background: var(--sig);
+  border-color: var(--sig);
+  color: var(--sig-ink);
+  transform: translateY(1px);
+  box-shadow: 0 0 0 2px var(--sig-glow);
+}
+
+.left {
+  top: 1px;
+  left: 1px;
+  width: calc(50% - 1px);
+  height: 44%;
+  border-radius: 58px 4px 0 0;
+  align-items: flex-end;
+  padding-bottom: 14px;
+}
+
+.right {
+  top: 1px;
+  right: 1px;
+  width: calc(50% - 1px);
+  height: 44%;
+  border-radius: 4px 58px 0 0;
+  align-items: flex-end;
+  padding-bottom: 14px;
+}
+
+.middle {
+  top: 16%;
+  left: 50%;
+  width: 26px;
+  height: 46px;
+  margin-left: -13px;
+  border-radius: 13px;
+  border-color: var(--cap-edge);
+  background: var(--plate);
+  font-size: 0;
+  z-index: 1;
+}
+
+.middle .regionLabel {
+  font-size: 9px;
+  writing-mode: vertical-rl;
+  letter-spacing: 0.04em;
+}
+
+.back,
+.forward {
+  left: -9px;
+  width: 22px;
+  height: 26px;
+  border-radius: 8px 3px 3px 8px;
+  border-color: var(--cap-edge);
+  background: var(--cap);
+  font-size: 9.5px;
+}
+
+.forward {
+  top: 46%;
+}
+
+.back {
+  top: calc(46% + 30px);
+}
+
+/* --- wheel detents ------------------------------------------------------- */
+
+.wheelColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  max-width: 220px;
+  padding-top: 2px;
+}
+
+.wheelButtons {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+/*
+ * Flat and dashed on purpose. Everything holdable in this app is drawn as an
+ * extruded cap; these two have no held state, so they get no depth.
+ */
+.detent {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 12px 0 9px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  cursor: default;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.detentArrow {
+  display: inline-flex;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .detent:not(:disabled):hover {
+    color: var(--text);
+    border-color: var(--text-faint);
+  }
+}
+
+.detent:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.detent[aria-pressed='true'] {
+  background: var(--sel);
+  border-style: solid;
+  border-color: var(--sel-edge);
+  color: var(--sel-text);
+}
+
+.detent[data-firing='true'] {
+  background: var(--sig);
+  border-style: solid;
+  border-color: var(--sig);
+  color: var(--sig-ink);
+}
+
+.detent:disabled {
+  color: var(--text-faint);
+  border-color: var(--line);
+  opacity: 0.7;
+}
+
+.wheelNote {
+  margin: 0;
+  max-width: 34ch;
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .region,
+  .detent {
+    transition-duration: 1ms;
+  }
+  .region[data-firing='true'] {
+    transform: none;
+  }
+}

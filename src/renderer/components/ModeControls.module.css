@@ -1,0 +1,178 @@
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  min-width: 0;
+}
+
+.heading {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+/* --- segmented control --------------------------------------------------- */
+
+.segments {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-2);
+  background: var(--plate);
+}
+
+.segment {
+  position: relative;
+  display: inline-flex;
+}
+
+.segmentInput {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  margin: 0;
+  cursor: default;
+}
+
+.segmentLabel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-1);
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .segmentInput:not(:checked):hover + .segmentLabel {
+    color: var(--text);
+  }
+}
+
+.segmentInput:checked + .segmentLabel {
+  background: var(--sel);
+  border-color: var(--sel-edge);
+  color: var(--sel-text);
+}
+
+.segmentInput:focus-visible + .segmentLabel {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.blurb {
+  margin: 0;
+  max-width: 56ch;
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+/* --- interval fields ----------------------------------------------------- */
+
+.fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding-top: 2px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.inputWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  padding: 0 8px 0 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-1);
+  background: var(--cap);
+}
+
+.inputWrap:focus-within {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.number {
+  width: 68px;
+  height: 100%;
+  padding: 0 4px 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.number:focus {
+  outline: none;
+}
+
+.unit {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.hint {
+  margin: 0;
+  color: var(--text-faint);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .segmentLabel {
+    transition-duration: 1ms;
+  }
+}

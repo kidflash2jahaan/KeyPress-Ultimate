@@ -1,0 +1,283 @@
+/*
+ * One keycap.
+ *
+ * The extrusion is two nested faces, not a shadow: `.key` is the side/edge
+ * face and `.cap` is the top face, sitting on top of it and inset from the
+ * bottom by `--cap-inset`. Pressing the key slides the top face down into its
+ * own skirt, which is why the press reads as physical rather than as a colour
+ * change. Every state is reachable without colour: the cap is extruded, lifted,
+ * ringed, depressed, flattened, or missing entirely.
+ *
+ * Motion budget: `transform` and `opacity` only, both on compositor-friendly
+ * elements. `--cap-y` composes the hover lift and the press depth into a single
+ * transform so the states never fight each other.
+ *
+ * Windows software-compositing fallback: setting `data-kbd-press="flat"` on any
+ * ancestor (documentElement is the intended place) drops the press to a flat
+ * 2px translate, which is the cheapest press that still reads.
+ */
+
+.key {
+  position: absolute;
+  left: calc(var(--kx) * var(--u) + var(--gap, 4px) / 2);
+  top: calc(var(--ky) * var(--u) + var(--gap, 4px) / 2);
+  width: calc(var(--kw) * var(--u) - var(--gap, 4px));
+  height: calc(var(--kh) * var(--u) - var(--gap, 4px));
+
+  /* Depth of the visible side face, hard-capped so legends keep their room. */
+  --cap-inset: min(8px, calc(var(--u) * 0.14));
+  --press-depth: calc(var(--cap-inset) - 1px);
+  --cap-y: 0px;
+
+  --legend-pad: calc(var(--u) * 0.1);
+  --cap-inner-w: calc(var(--kw) * var(--u) - var(--gap, 4px) - 2 * var(--legend-pad));
+  --legend-base: max(10px, calc(var(--u) * 0.27));
+  --sub-base: max(9px, calc(var(--u) * 0.2));
+
+  display: block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-2, 7px);
+  background: var(--cap-edge);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  isolation: isolate;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+[data-kbd-press='flat'] .key {
+  --press-depth: 2px;
+}
+
+.key:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+  z-index: 3;
+}
+
+/* ---------------------------------------------------------------------------
+   The top face
+   --------------------------------------------------------------------------- */
+
+.cap {
+  position: absolute;
+  inset: 0 0 var(--cap-inset) 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--legend-pad);
+  border-radius: calc(var(--radius-2, 7px) - 1px);
+  background: linear-gradient(180deg, var(--cap-top), var(--cap));
+  transform: translateY(var(--cap-y));
+  transition: transform var(--dur-base, 160ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+  will-change: transform;
+}
+
+/* Hover sheen. A neutral wash of --text at low opacity, so hover never spends
+   colour and never animates anything but opacity. */
+.cap::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--text);
+  opacity: 0;
+  transition: opacity var(--dur-fast, 90ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+  pointer-events: none;
+}
+
+/* Hatching for a key that exists but cannot be held. */
+.cap::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 3px,
+    var(--line-strong) 3px 4px
+  );
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .key[data-interactive='true']:hover {
+    --cap-y: -1px;
+  }
+
+  .key[data-interactive='true']:hover .cap::after {
+    opacity: 0.07;
+  }
+}
+
+.key[data-interactive='true']:active {
+  --cap-y: var(--press-depth);
+}
+
+/* ---------------------------------------------------------------------------
+   Legends
+   --------------------------------------------------------------------------- */
+
+.legend {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--u) * 0.02);
+  min-width: 0;
+  line-height: 1.06;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.primary {
+  display: block;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: clamp(
+    8px,
+    min(var(--legend-base), calc(var(--cap-inner-w) / var(--legend-div))),
+    15px
+  );
+  letter-spacing: -0.01em;
+}
+
+.sub {
+  display: block;
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: clamp(7px, min(var(--sub-base), calc(var(--cap-inner-w) / var(--sub-div))), 12px);
+  letter-spacing: -0.005em;
+}
+
+/* ---------------------------------------------------------------------------
+   Firing. The only place --sig appears anywhere in the app.
+   --------------------------------------------------------------------------- */
+
+.glow {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    0 0 0 1px var(--sig),
+    0 0 calc(var(--u) * 0.45) var(--sig-glow, color-mix(in srgb, var(--sig) 45%, transparent));
+  opacity: 0;
+  transition: opacity var(--dur-base, 160ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+  pointer-events: none;
+}
+
+.key[data-state='firing'] {
+  --cap-y: var(--press-depth);
+  z-index: 2;
+}
+
+.key[data-state='firing'] .cap {
+  background: var(--sig);
+  /* Current arrives fast; it leaves a little slower, so a burst of twenty keys
+     releasing reads as a wave settling rather than a flicker. */
+  transition-duration: var(--dur-fast, 90ms);
+}
+
+.key[data-state='firing'] .glow {
+  opacity: 1;
+  transition-duration: var(--dur-fast, 90ms);
+}
+
+.key[data-state='firing'] .primary,
+.key[data-state='firing'] .sub {
+  color: var(--sig-ink);
+  font-weight: 650;
+}
+
+/* ---------------------------------------------------------------------------
+   Selected. Static neutral fill: no pulse, no glow, no animation. Fifteen
+   selected keys must not be fifteen looping animations.
+   --------------------------------------------------------------------------- */
+
+.key[data-state='selected'] {
+  background: var(--sel-edge);
+}
+
+.key[data-state='selected'] .cap {
+  background: var(--sel);
+  box-shadow: inset 0 0 0 1.5px var(--sel-edge);
+}
+
+.key[data-state='selected'] .primary {
+  color: var(--sel-text);
+  font-weight: 620;
+}
+
+.key[data-state='selected'] .sub {
+  color: var(--sel-text);
+  opacity: 0.7;
+}
+
+/* ---------------------------------------------------------------------------
+   Disabled: the cap is there but it is flat and hatched. Nothing to press.
+   --------------------------------------------------------------------------- */
+
+.key[data-state='disabled'] {
+  --cap-inset: 1px;
+  --press-depth: 0px;
+  background: var(--line);
+  cursor: not-allowed;
+}
+
+.key[data-state='disabled'] .cap {
+  background: var(--bg-raised);
+}
+
+.key[data-state='disabled'] .cap::before {
+  opacity: 0.5;
+}
+
+.key[data-state='disabled'] .primary,
+.key[data-state='disabled'] .sub {
+  color: var(--text-faint);
+}
+
+/* ---------------------------------------------------------------------------
+   Unavailable: no keycap at all, just the empty socket in the plate.
+   --------------------------------------------------------------------------- */
+
+.key[data-state='unavailable'] {
+  --cap-inset: 0px;
+  --press-depth: 0px;
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.key[data-state='unavailable'] .cap {
+  background: var(--plate);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.key[data-state='unavailable'] .primary,
+.key[data-state='unavailable'] .sub {
+  color: var(--text-faint);
+  opacity: 0.55;
+}
+
+/* ---------------------------------------------------------------------------
+   Reduced motion collapses the press to an instant state change. Declared last
+   so it wins over the per-state durations above.
+   --------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .key .cap,
+  .key .cap::after,
+  .key .glow,
+  .key[data-state='firing'] .cap,
+  .key[data-state='firing'] .glow {
+    transition-duration: 0s;
+  }
+}

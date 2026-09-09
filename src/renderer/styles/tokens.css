@@ -1,0 +1,281 @@
+/* ============================================================================
+   KeyPress Ultimate - design tokens
+   ----------------------------------------------------------------------------
+   THE ONE RULE
+   Colour encodes state and nothing else. --sig (amber) means "current is
+   flowing" and never anything else: not a brand accent, not a hover, not a
+   focus ring, not a link, not a selected key. Selection is a neutral fill
+   (--sig's opposite number, --sel) and carries no animation. Every scrap of
+   motion in this app is spent on the firing state.
+
+   If you are about to add a colour, you are about to break the app's only
+   real signal. Add weight, size, spacing or a border instead.
+   ----------------------------------------------------------------------------
+   HOW THEMING WORKS HERE
+   1. Bare :root carries the COMPLETE light palette. Every colour has its one
+      canonical definition here, so no value lives only inside a media query.
+   2. The dark palette redefines only the tokens that change, in two places:
+        @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) }
+        :root[data-theme="dark"]
+      The second block comes last so a manual "dark" override beats a light OS.
+   3. :root[data-theme="light"] needs no palette of its own: the media block is
+      guarded with :not([data-theme="light"]), so an explicit light choice falls
+      straight back to the bare :root values and wins against a dark OS. That
+      block exists only to pin color-scheme. Keeping one copy of light is
+      deliberate - a third copy is a third thing to drift.
+
+   Non-colour tokens (geometry, motion, type, spacing) are theme independent
+   and are declared once, on bare :root only.
+   ============================================================================ */
+
+:root {
+  color-scheme: light;
+
+  /* -- Surfaces ------------------------------------------------------------
+     bg        the window ground, behind every band
+     bg-raised panels that sit above the ground: header, sheets, popovers
+     plate     the machined tray the keycaps are set into
+     cap       a keycap's body / front face
+     cap-top   the lit upper bevel of a keycap (the light comes from above)
+     cap-edge  the cut edge where a cap meets the plate                     */
+  --bg: #f4f4f2;
+  --bg-raised: #ffffff;
+  --plate: #eaeae7;
+  --cap: #ffffff;
+  --cap-top: #ffffff;
+  --cap-edge: #d8d8d4;
+
+  /* -- Text ----------------------------------------------------------------
+     text       primary reading text and key legends
+     text-dim   secondary text: sub-legends, metadata, inactive labels
+     text-faint the quietest tier that is still real information            */
+  --text: #16161a;
+  --text-dim: #5c5c66;
+  --text-faint: #6a6a74; /* adjusted from #8E8E98, see styles/README.md */
+
+  /* -- Lines ---------------------------------------------------------------
+     line        hairline separators between bands and rows
+     line-strong a deliberate boundary: plate outline, input border         */
+  --line: #dededa;
+  --line-strong: #c4c4be;
+
+  /* -- Signal (RESERVED: "current is flowing", nothing else) ---------------
+     sig      the amber fill of a firing key / the live holding indicator
+     sig-ink  the legend printed on top of a firing fill
+     sig-glow the halo colour around a firing element; use in box-shadow    */
+  --sig: #d45f00; /* adjusted from #E06A00, see styles/README.md */
+  --sig-ink: #1a0e03; /* adjusted from #FFFFFF, see styles/README.md */
+  --sig-glow: color-mix(in srgb, var(--sig) 32%, transparent);
+
+  /* -- Status --------------------------------------------------------------
+     Not decoration. --ok appears only on a completed recovery or a granted
+     permission; --danger only on a real failure or a destructive action.   */
+  --ok: #137a39; /* adjusted from #16A34A, see styles/README.md */
+  --danger: #c62a2a; /* adjusted from #D93636, see styles/README.md */
+
+  /* -- Selected (NEUTRAL by design - never amber, never animated) ---------- */
+  --sel: #dde3ec;
+  --sel-edge: #b9c4d4;
+  --sel-text: #16161a;
+
+  /* -- Depth ---------------------------------------------------------------
+     Built from the palette so components never carry a raw rgba(). Light
+     theme shadows are soft and short: the plate is lit from above, close. */
+  --shadow-1: 0 1px 2px rgb(20 20 26 / 8%);
+  --shadow-2: 0 8px 24px -6px rgb(20 20 26 / 18%);
+
+  /* -- Geometry ------------------------------------------------------------
+     --u is THE key unit, in CSS pixels. Everything on the board is a
+     multiple of it (see data/layout-notes.md). A full-size 104 board is
+     22.5u wide, so --u is solved from the viewport rather than stepped at a
+     breakpoint: it lands on exactly 48px at the 1180px default window,
+     tapers continuously as the window narrows, and floors at 30px, below
+     which the keyboard band scrolls horizontally instead of shrinking.  */
+  --keyboard-units: 22.5;
+  --keyboard-inset: 96px; /* total horizontal padding of the keyboard band, both sides */
+  --u: clamp(30px, calc((100vw - var(--keyboard-inset)) / var(--keyboard-units)), 48px);
+
+  /* Gutter between keycaps. Subtracted INSIDE each unit box, never added as
+     an outer margin, so 1u and 2 x 0.5u occupy identical pitch. */
+  --gap: calc(var(--u) * 0.09);
+
+  /* Tight radii. This is machined hardware, not a rounded-card SaaS kit. */
+  --radius-1: 3px; /* inner faces, chips, tags */
+  --radius-2: 6px; /* keycaps, buttons, inputs */
+  --radius-3: 10px; /* plates, panels, sheets */
+
+  /* Frameless-window chrome. The header band is the drag region; on macOS the
+     OS draws the traffic lights inside it and --titlebar-lights-inset reserves
+     their space. Set that inset to 0 from JS on Windows, where the window
+     controls sit on the right and the app draws them itself. */
+  --titlebar-height: 44px;
+  --titlebar-lights-inset: 78px;
+
+  /* Layout spacing scale. Dense, because this is an instrument panel. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* How far a keycap travels down when it fires. Zeroed under reduced
+     motion, so a component that writes translateY(var(--press-travel))
+     needs no media query of its own. */
+  --press-travel: 2px;
+
+  /* -- Motion --------------------------------------------------------------
+     Honest values, each tied to what it is actually for:
+     fast  a key press/release. Physical switch actuation is ~5ms and the eye
+           reads anything under ~100ms as instant, so 90ms is the longest it
+           can be while still feeling like the key answered the click.
+     base  hover, selection settle, chip in/out. Long enough to be seen as a
+           transition, short enough that a 15-key multi-select never queues.
+     slow  a surface that changes size or arrives: settings sheet, popover.
+     Nothing in this app should be slower than --dur-slow.                  */
+  --dur-fast: 90ms;
+  --dur-base: 160ms;
+  --dur-slow: 260ms;
+
+  /* ease-out: everything the user initiated. Fast start, settled landing.
+     ease-spring: a small deliberate overshoot for the release of a keycap.
+     Kept mild (1.4, not the usual 1.7) because the travel is 2px, and a big
+     overshoot on 2px reads as a rendering bug rather than as springiness. */
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+
+  /* -- Type ----------------------------------------------------------------
+     Geist Sans and Geist Mono are vendored (SIL OFL 1.1) in
+     ../assets/fonts and declared in fonts.css.
+
+     The fallbacks are not boilerplate. Geist has NO glyphs for the Apple
+     modifier legends this app must print: U+2318 command, U+2325 option,
+     U+2303 control, U+21EA caps lock, U+238B escape, U+232B delete-left,
+     U+2326 delete-right. CSS falls back per character, so -apple-system,
+     Segoe UI Symbol and Apple Symbols sit in the stack purely to supply
+     those seven glyphs. Do not shorten the stack.                          */
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Segoe UI Symbol',
+    'Apple Symbols', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+}
+
+/* ---------------------------------------------------------------------------
+   DARK - follows the OS, unless the user pinned light.
+   Only the tokens that actually change are restated.
+   --------------------------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --bg: #0b0b0d;
+    --bg-raised: #131316;
+    --plate: #0f0f12;
+    --cap: #1b1b1f;
+    --cap-top: #232329;
+    --cap-edge: #303038;
+
+    --text: #ededf0;
+    --text-dim: #9a9aa4;
+    --text-faint: #82828c; /* adjusted from #62626C, see styles/README.md */
+
+    --line: #232328;
+    --line-strong: #34343c;
+
+    --sig: #ff9a3c;
+    --sig-ink: #1a0e03;
+    --sig-glow: color-mix(in srgb, var(--sig) 45%, transparent);
+
+    --ok: #4ade80;
+    --danger: #ff5c5c;
+
+    --sel: #2b2f38;
+    --sel-edge: #3c4250;
+    --sel-text: #ffffff;
+
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 55%);
+    --shadow-2: 0 10px 30px -8px rgb(0 0 0 / 70%);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   DARK - manual override. Declared after the media block so it wins at equal
+   specificity when the OS is light and the user asked for dark.
+   Keep this block byte-identical to the media block above.
+   --------------------------------------------------------------------------- */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #0b0b0d;
+  --bg-raised: #131316;
+  --plate: #0f0f12;
+  --cap: #1b1b1f;
+  --cap-top: #232329;
+  --cap-edge: #303038;
+
+  --text: #ededf0;
+  --text-dim: #9a9aa4;
+  --text-faint: #82828c; /* adjusted from #62626C, see styles/README.md */
+
+  --line: #232328;
+  --line-strong: #34343c;
+
+  --sig: #ff9a3c;
+  --sig-ink: #1a0e03;
+  --sig-glow: color-mix(in srgb, var(--sig) 45%, transparent);
+
+  --ok: #4ade80;
+  --danger: #ff5c5c;
+
+  --sel: #2b2f38;
+  --sel-edge: #3c4250;
+  --sel-text: #ffffff;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 55%);
+  --shadow-2: 0 10px 30px -8px rgb(0 0 0 / 70%);
+}
+
+/* ---------------------------------------------------------------------------
+   LIGHT - manual override. No palette needed: the dark media block is guarded
+   with :not([data-theme="light"]), so the bare :root values above already
+   apply, on a light OS and a dark one alike. This only pins color-scheme so
+   native scrollbars and form controls stay light on a dark OS.
+   --------------------------------------------------------------------------- */
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+/* ---------------------------------------------------------------------------
+   REDUCED MOTION
+   Collapse the duration tokens, flatten the eases, and zero the press travel
+   so transform-driven motion stops without any component opting in. The
+   catch-all below is the backstop for third-party or inline animation; a
+   component whose transform exists ONLY as motion can also carry
+   [data-motion-transform] to have it neutralised outright.
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 1ms;
+    --dur-base: 1ms;
+    --dur-slow: 1ms;
+    --ease-out: linear;
+    --ease-spring: linear;
+    --press-travel: 0px;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  [data-motion-transform] {
+    transform: none !important;
+  }
+}

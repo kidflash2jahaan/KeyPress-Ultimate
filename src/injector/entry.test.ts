@@ -1,0 +1,411 @@
+import { describe, expect, it } from 'vitest'
+import type { InjectorToMainMessage } from '@shared/ipc'
+import { HEARTBEAT_TIMEOUT_MS } from '@shared/ipc'
+import type { AppInfo, KeyDef, MouseDef, SessionConfig } from '@shared/types'
+import type { InjectorNative } from './hold-loop'
+import type { InjectorMessageEvent, InjectorPort, ProcessLike } from './entry'
+import {
+  createInjectorRuntime,
+  FAILSAFE_SIGNALS,
+  installFailsafeHandlers,
+  parseMainToInjectorMessage,
+  parseOurPids,
+} from './entry'
+import type { Clock, TimerHandle } from './scheduler'
+
+// ---------------------------------------------------------------------------
+// Fakes: no Electron, no real process, no real timers, no real input.
+// ---------------------------------------------------------------------------
+
+interface FakeClock extends Clock {
+  advance(ms: number): void
+}
+
+function createFakeClock(start = 1_000): FakeClock {
+  let time = start
+  let seq = 0
+  const timers = new Map<number, { at: number; callback: () => void }>()
+  return {
+    now: () => time,
+    setTimeout(callback: () => void, delayMs: number): TimerHandle {
+      const id = ++seq
+      timers.set(id, { at: time + Math.max(0, delayMs), callback })
+      return id
+    },
+    clearTimeout(handle: TimerHandle): void {
+      timers.delete(handle as number)
+    },
+    advance(ms: number): void {
+      const end = time + ms
+      for (;;) {
+        let nextId: number | null = null
+        let nextAt = Number.POSITIVE_INFINITY
+        for (const [id, timer] of timers) {
+          if (timer.at < nextAt) {
+            nextAt = timer.at
+            nextId = id
+          }
+        }
+        if (nextId === null || nextAt > end) break
+        const timer = timers.get(nextId)
+        timers.delete(nextId)
+        time = nextAt
+        timer?.callback()
+      }
+      time = end
+    },
+  }
+}
+
+const TARGET: AppInfo = { identity: 'com.mojang.minecraft', name: 'Minecraft', pid: 4242, path: null }
+
+interface FakeNative {
+  native: InjectorNative
+  calls: string[]
+  count(name: string): number
+}
+
+function createFakeNative(): FakeNative {
+  const calls: string[] = []
+  const native: InjectorNative = {
+    async init(): Promise<void> {
+      calls.push('init')
+    },
+    listApplications: (): AppInfo[] => [TARGET],
+    getFrontmostPid: (): number | null => TARGET.pid,
+    keyDown: (key: KeyDef): void => {
+      calls.push(`keyDown:${key.id}`)
+    },
+    keyUp: (key: KeyDef): void => {
+      calls.push(`keyUp:${key.id}`)
+    },
+    mouseDown: (button: MouseDef): void => {
+      calls.push(`mouseDown:${button.id}`)
+    },
+    mouseUp: (button: MouseDef): void => {
+      calls.push(`mouseUp:${button.id}`)
+    },
+    releaseAll: (): void => {
+      calls.push('releaseAll')
+    },
+    hasPermission: (): boolean => true,
+    openPermissionSettings: (): void => {},
+    dispose: (): void => {
+      calls.push('dispose')
+    },
+  }
+  return {
+    native,
+    calls,
+    count: (name) => calls.filter((call) => call === name).length,
+  }
+}
+
+interface FakePort extends InjectorPort {
+  sent: InjectorToMainMessage[]
+  emit(data: unknown): void
+}
+
+function createFakePort(): FakePort {
+  const sent: InjectorToMainMessage[] = []
+  let listener: ((event: InjectorMessageEvent) => void) | null = null
+  return {
+    sent,
+    postMessage(message: InjectorToMainMessage): void {
+      sent.push(message)
+    },
+    on(_event: 'message', handler: (event: InjectorMessageEvent) => void): unknown {
+      listener = handler
+      return this
+    },
+    emit(data: unknown): void {
+      listener?.({ data })
+    },
+  }
+}
+
+interface FakeProcess extends ProcessLike {
+  fire(event: string): void
+  handlers: Map<string, (() => void)[]>
+  exitCodes: number[]
+}
+
+function createFakeProcess(): FakeProcess {
+  const handlers = new Map<string, (() => void)[]>()
+  const exitCodes: number[] = []
+  return {
+    handlers,
+    exitCodes,
+    on(event: string, listener: () => void): unknown {
+      const list = handlers.get(event) ?? []
+      list.push(listener)
+      handlers.set(event, list)
+      return this
+    },
+    exit(code = 0): void {
+      exitCodes.push(code)
+    },
+    fire(event: string): void {
+      for (const listener of handlers.get(event) ?? []) listener()
+    },
+  }
+}
+
+function config(overrides: Partial<SessionConfig> = {}): SessionConfig {
+  return {
+    keyIds: ['key-w'],
+    buttonIds: [],
+    targets: [TARGET.identity],
+    mode: 'hold',
+    repeatInitialMs: 400,
+    repeatIntervalMs: 33,
+    tapIntervalMs: 100,
+    ...overrides,
+  }
+}
+
+function runtimeHarness() {
+  const clock = createFakeClock()
+  const fake = createFakeNative()
+  const port = createFakePort()
+  const exitCodes: number[] = []
+  const runtime = createInjectorRuntime({
+    port,
+    native: fake.native,
+    clock,
+    spinMs: 0,
+    platform: 'darwin',
+    ourPids: [999],
+    exit: (code) => exitCodes.push(code),
+  })
+  runtime.start()
+  return { clock, fake, port, runtime, exitCodes }
+}
+
+// ---------------------------------------------------------------------------
+
+describe('parseOurPids', () => {
+  it('takes the main pid off argv and always includes our own', () => {
+    expect(parseOurPids(['node', 'injector.js', '--main-pid=321'], 654)).toEqual([654, 321])
+  })
+
+  it('survives a missing or malformed argument', () => {
+    expect(parseOurPids([], 7)).toEqual([7])
+    expect(parseOurPids(['--main-pid=', '--main-pid=abc'], 7)).toEqual([7])
+  })
+})
+
+describe('parseMainToInjectorMessage', () => {
+  it('accepts every tag in the protocol', () => {
+    expect(parseMainToInjectorMessage({ t: 'ping', n: 4 })).toEqual({ t: 'ping', n: 4 })
+    expect(parseMainToInjectorMessage({ t: 'disarm', reason: 'user-stop' })).toEqual({
+      t: 'disarm',
+      reason: 'user-stop',
+    })
+    expect(parseMainToInjectorMessage({ t: 'arm', config: config() })?.t).toBe('arm')
+    expect(parseMainToInjectorMessage({ t: 'settings', settings: {} })?.t).toBe('settings')
+  })
+
+  it('rejects anything else rather than trusting it', () => {
+    expect(parseMainToInjectorMessage(null)).toBeNull()
+    expect(parseMainToInjectorMessage('arm')).toBeNull()
+    expect(parseMainToInjectorMessage({ t: 'nope' })).toBeNull()
+    expect(parseMainToInjectorMessage({ t: 'ping' })).toBeNull()
+    expect(parseMainToInjectorMessage({ t: 'arm' })).toBeNull()
+  })
+})
+
+describe('message handling', () => {
+  it('answers a ping with a matching pong', () => {
+    const h = runtimeHarness()
+    h.port.emit({ t: 'ping', n: 17 })
+    expect(h.port.sent).toContainEqual({ t: 'pong', n: 17 })
+  })
+
+  it('arms and disarms the hold loop, and reports state and releases upward', () => {
+    const h = runtimeHarness()
+    h.port.emit({ t: 'arm', config: config() })
+    h.clock.advance(300)
+    expect(h.fake.count('keyDown:key-w')).toBe(1)
+
+    const states = h.port.sent.filter((message) => message.t === 'state')
+    expect(states.length).toBeGreaterThan(0)
+    const firing = states.find((message) => message.firingKeyIds.length > 0)
+    expect(firing?.onTarget).toBe(true)
+    expect(firing?.focusedPid).toBe(TARGET.pid)
+
+    h.port.emit({ t: 'disarm', reason: 'user-stop' })
+    expect(h.fake.count('keyUp:key-w')).toBe(1)
+    expect(h.port.sent).toContainEqual({ t: 'released', count: 1 })
+  })
+
+  it('reports a configuration that cannot be held as an error, not a crash', () => {
+    const h = runtimeHarness()
+    h.port.emit({ t: 'arm', config: config({ keyIds: ['key-caps-lock'] }) })
+    const errors = h.port.sent.filter((message) => message.t === 'error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0]?.message).toContain('nothing to hold')
+  })
+
+  it('ignores an unrecognised message instead of acting on it', () => {
+    const h = runtimeHarness()
+    h.port.emit({ t: 'arm' })
+    h.port.emit({ hello: 'world' })
+    h.clock.advance(1_000)
+    expect(h.fake.calls).toHaveLength(0)
+    expect(h.port.sent).toHaveLength(0)
+  })
+})
+
+describe('heartbeat', () => {
+  it('releases and exits when main goes quiet for the timeout', () => {
+    const h = runtimeHarness()
+    h.port.emit({ t: 'arm', config: config() })
+    h.clock.advance(300)
+    expect(h.fake.count('keyDown:key-w')).toBe(1)
+
+    h.port.emit({ t: 'ping', n: 1 })
+    h.clock.advance(HEARTBEAT_TIMEOUT_MS - 120)
+    expect(h.exitCodes).toHaveLength(0)
+
+    h.clock.advance(200)
+    expect(h.fake.count('keyUp:key-w')).toBe(1)
+    expect(h.fake.count('releaseAll')).toBe(1)
+    expect(h.fake.count('dispose')).toBe(1)
+    expect(h.exitCodes).toEqual([1])
+  })
+
+  it('stays alive as long as the pings keep coming', () => {
+    const h = runtimeHarness()
+    h.port.emit({ t: 'arm', config: config() })
+    for (let i = 0; i < 60; i++) {
+      h.port.emit({ t: 'ping', n: i })
+      h.clock.advance(100)
+    }
+    expect(h.exitCodes).toHaveLength(0)
+    expect(h.fake.count('releaseAll')).toBe(0)
+  })
+
+  it('does not fire before main has ever pinged', () => {
+    const h = runtimeHarness()
+    h.clock.advance(60_000)
+    expect(h.exitCodes).toHaveLength(0)
+  })
+
+  it('exits only once even if the watchdog would fire again', () => {
+    const h = runtimeHarness()
+    h.port.emit({ t: 'ping', n: 1 })
+    h.clock.advance(10_000)
+    expect(h.exitCodes).toEqual([1])
+    expect(h.fake.count('releaseAll')).toBe(1)
+  })
+})
+
+describe('failsafe handlers', () => {
+  it('registers every exit path named in the spec', () => {
+    const h = runtimeHarness()
+    const proc = createFakeProcess()
+    installFailsafeHandlers(h.runtime, proc)
+    expect([...proc.handlers.keys()].sort()).toEqual(
+      ['SIGHUP', 'SIGINT', 'SIGTERM', 'exit', 'uncaughtException'].sort(),
+    )
+    expect(FAILSAFE_SIGNALS).toEqual(['SIGINT', 'SIGTERM', 'SIGHUP'])
+  })
+
+  it.each(['exit', 'SIGINT', 'SIGTERM', 'SIGHUP', 'uncaughtException'])(
+    'releases everything exactly once when %s fires',
+    (event) => {
+      const h = runtimeHarness()
+      const proc = createFakeProcess()
+      installFailsafeHandlers(h.runtime, proc)
+      h.port.emit({ t: 'arm', config: config() })
+      h.clock.advance(300)
+      expect(h.fake.count('keyDown:key-w')).toBe(1)
+
+      proc.fire(event)
+      expect(h.fake.count('keyUp:key-w')).toBe(1)
+      expect(h.fake.count('releaseAll')).toBe(1)
+      expect(h.runtime.shutdownCount).toBe(1)
+
+      // Firing again, and firing every other handler too, must not double-release.
+      proc.fire(event)
+      for (const other of ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP', 'uncaughtException']) {
+        proc.fire(other)
+      }
+      expect(h.fake.count('keyUp:key-w')).toBe(1)
+      expect(h.fake.count('releaseAll')).toBe(1)
+      expect(h.fake.count('dispose')).toBe(1)
+    },
+  )
+
+  it('does not call process.exit from inside the exit handler', () => {
+    const h = runtimeHarness()
+    const proc = createFakeProcess()
+    installFailsafeHandlers(h.runtime, proc)
+    h.port.emit({ t: 'arm', config: config() })
+    h.clock.advance(300)
+
+    proc.fire('exit')
+    expect(h.fake.count('releaseAll')).toBe(1)
+    expect(h.exitCodes).toHaveLength(0)
+  })
+
+  it('exits non-zero on an uncaught exception and zero on a signal', () => {
+    const a = runtimeHarness()
+    const procA = createFakeProcess()
+    installFailsafeHandlers(a.runtime, procA)
+    procA.fire('uncaughtException')
+    expect(a.exitCodes).toEqual([1])
+
+    const b = runtimeHarness()
+    const procB = createFakeProcess()
+    installFailsafeHandlers(b.runtime, procB)
+    procB.fire('SIGTERM')
+    expect(b.exitCodes).toEqual([0])
+  })
+
+  it('stops the loop dead after a shutdown, so no tick can press again', () => {
+    const h = runtimeHarness()
+    const proc = createFakeProcess()
+    installFailsafeHandlers(h.runtime, proc)
+    h.port.emit({ t: 'arm', config: config() })
+    h.clock.advance(300)
+    proc.fire('SIGINT')
+
+    const after = h.fake.calls.length
+    h.clock.advance(10_000)
+    expect(h.fake.calls).toHaveLength(after)
+  })
+})
+
+describe('port failures', () => {
+  it('keeps releasing keys even when the port is dead', () => {
+    const clock = createFakeClock()
+    const fake = createFakeNative()
+    const port = createFakePort()
+    const broken: FakePort = {
+      ...port,
+      postMessage(): void {
+        throw new Error('parent port is gone')
+      },
+    }
+    const exitCodes: number[] = []
+    const runtime = createInjectorRuntime({
+      port: broken,
+      native: fake.native,
+      clock,
+      spinMs: 0,
+      platform: 'darwin',
+      exit: (code) => exitCodes.push(code),
+    })
+    runtime.start()
+    broken.emit({ t: 'arm', config: config() })
+    clock.advance(300)
+    expect(fake.count('keyDown:key-w')).toBe(1)
+
+    runtime.shutdown('signal', 0)
+    expect(fake.count('keyUp:key-w')).toBe(1)
+    expect(fake.count('releaseAll')).toBe(1)
+    expect(exitCodes).toEqual([0])
+  })
+})
