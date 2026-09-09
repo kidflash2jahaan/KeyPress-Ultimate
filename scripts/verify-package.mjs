@@ -222,7 +222,13 @@ if (!dr.ok) {
 } else {
   // codesign prints "designated =>" on stderr, sometimes prefixed with "# ".
   const line = (dr.out.split("\n").find((l) => l.replace(/^#\s*/, "").startsWith("designated =>")) ?? "").replace(/^#\s*/, "").trim();
-  if (/certificate leaf/.test(line)) {
+  // A self-signed certificate is its own root, so macOS renders its requirement
+  // as `certificate root = H"..."`; a chained (Developer ID) certificate renders
+  // as `certificate leaf = H"..."`. Both are pinned to a certificate that
+  // outlives the build, which is the property that keeps the user's
+  // Accessibility grant working across updates. Only a cdhash requirement is
+  // per-build, and that is handled below.
+  if (/certificate (leaf|root)/.test(line)) {
     if (line.includes(`identifier "${BUNDLE_ID}"`)) {
       pass("designated requirement is stable (certificate-anchored)");
     } else {
