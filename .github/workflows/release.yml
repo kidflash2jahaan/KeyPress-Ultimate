@@ -280,7 +280,11 @@ jobs:
           # A certificate-anchored requirement is the entire point of the cert.
           # If we got here with a cdhash requirement, signing silently degraded.
           case "$REQ" in
-            *"certificate leaf"*) echo "ok: requirement is certificate-anchored" ;;
+            # A self-signed certificate is its own root, so macOS renders the
+            # requirement as `certificate root`; a chained Developer ID cert
+            # renders as `certificate leaf`. Both outlive the build, which is
+            # the property that preserves the user's Accessibility grant.
+            *"certificate leaf"*|*"certificate root"*) echo "ok: requirement is certificate-anchored" ;;
             *) echo "::error::Signed with $SIGN_IDENTITY but the designated requirement is not certificate-anchored: $REQ"; exit 1 ;;
           esac
 

@@ -886,16 +886,41 @@ describe('loading on a non-Windows host', () => {
     expect(fresh.getDiagnostics().initialised).toBe(false)
   })
 
-  it('parks the init failure in initError instead of throwing at import', async () => {
+  // The wrong-platform path only exists off Windows. On Windows the adapter is
+  // expected to actually bind, so asserting the refusal message there would be
+  // asserting that the real target platform is broken.
+  it.skipIf(process.platform === 'win32')(
+    'parks the init failure in initError instead of throwing at import',
+    async () => {
+      const fresh = createWindowsNativeInput()
+      await expect(fresh.init()).rejects.toThrow(/Windows input adapter was loaded on/)
+      expect(fresh.initError).toBeInstanceOf(Error)
+      expect(fresh.ready).toBe(false)
+      const diagnostics = fresh.getDiagnostics()
+      expect(diagnostics.initialised).toBe(false)
+      expect(diagnostics.initError).toMatch(/Windows/)
+      // The same failure comes back on a second call rather than being retried forever.
+      await expect(fresh.init()).rejects.toBe(fresh.initError)
+    },
+  )
+
+  // The contract that must hold on EVERY platform, Windows included: import is
+  // side-effect free and init() either succeeds or parks a real Error. It must
+  // never throw at import and never leave `ready` true after a failure.
+  it('never throws at import, and init either succeeds or parks a real error', async () => {
     const fresh = createWindowsNativeInput()
-    await expect(fresh.init()).rejects.toThrow(/Windows input adapter was loaded on/)
-    expect(fresh.initError).toBeInstanceOf(Error)
-    expect(fresh.ready).toBe(false)
-    const diagnostics = fresh.getDiagnostics()
-    expect(diagnostics.initialised).toBe(false)
-    expect(diagnostics.initError).toMatch(/Windows/)
-    // The same failure comes back on a second call rather than being retried forever.
-    await expect(fresh.init()).rejects.toBe(fresh.initError)
+    expect(fresh.initError).toBeNull()
+    try {
+      await fresh.init()
+      expect(fresh.ready).toBe(true)
+      expect(fresh.initError).toBeNull()
+      expect(fresh.getDiagnostics().initialised).toBe(true)
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error)
+      expect(fresh.initError).toBe(error)
+      expect(fresh.ready).toBe(false)
+      expect(fresh.getDiagnostics().initialised).toBe(false)
+    }
   })
 
   it('throws on injection rather than silently doing nothing', () => {
