@@ -1,4 +1,8 @@
 .strip {
+  /* Never shrinks. The keyboard band below is the only flex item in the main
+     column that gives up height, and it does that by solving a smaller unit
+     rather than by clipping anything. */
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   grid-template-areas:

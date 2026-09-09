@@ -115,6 +115,8 @@ export type InjectorToMainMessage =
   | { t: 'pong'; n: number }
   | { t: 'error'; code: InjectorErrorCode; message: string }
   | { t: 'released'; count: number }
+  /** Windows UIPI: the target is elevated and nothing we post can reach it. */
+  | { t: 'blocked'; code: 'elevated-target'; message: string; appName: string }
 
 export type MainToInjectorTag = MainToInjectorMessage['t']
 export type InjectorToMainTag = InjectorToMainMessage['t']

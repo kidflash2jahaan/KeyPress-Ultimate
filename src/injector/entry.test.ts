@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { InjectorToMainMessage } from '@shared/ipc'
-import { HEARTBEAT_TIMEOUT_MS } from '@shared/ipc'
-import type { AppInfo, KeyDef, MouseDef, SessionConfig } from '@shared/types'
+import { HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS } from '@shared/ipc'
+import type { AppInfo, KeyDef, MouseDef, SessionConfig, Settings } from '@shared/types'
+import type { ForegroundBlockingReport } from './native/windows'
 import type { InjectorNative } from './hold-loop'
 import type { InjectorMessageEvent, InjectorPort, ProcessLike } from './entry'
 import {
@@ -164,14 +165,26 @@ function config(overrides: Partial<SessionConfig> = {}): SessionConfig {
   }
 }
 
-function runtimeHarness() {
+function settings(overrides: Partial<Settings> = {}): Settings {
+  return {
+    theme: 'system',
+    panicHotkey: 'CommandOrControl+Alt+Shift+K',
+    maxSessionMinutes: 30,
+    autoCheckUpdates: true,
+    windowsUseVirtualKeys: false,
+    ...overrides,
+  }
+}
+
+/** `decorate` wraps the recording fake, so extra adapter capabilities can be bolted on. */
+function runtimeHarness(decorate?: (native: InjectorNative) => InjectorNative) {
   const clock = createFakeClock()
   const fake = createFakeNative()
   const port = createFakePort()
   const exitCodes: number[] = []
   const runtime = createInjectorRuntime({
     port,
-    native: fake.native,
+    native: decorate ? decorate(fake.native) : fake.native,
     clock,
     spinMs: 0,
     platform: 'darwin',
@@ -179,7 +192,24 @@ function runtimeHarness() {
     exit: (code) => exitCodes.push(code),
   })
   runtime.start()
-  return { clock, fake, port, runtime, exitCodes }
+
+  let pings = 0
+  /**
+   * Advance the clock the way a live main does: a ping every heartbeat
+   * interval. Plain `clock.advance` simulates a main that has gone silent,
+   * which after HEARTBEAT_TIMEOUT_MS is a main the injector must outlive.
+   */
+  function advanceAlive(ms: number): void {
+    let remaining = ms
+    while (remaining > 0) {
+      const step = Math.min(HEARTBEAT_INTERVAL_MS, remaining)
+      clock.advance(step)
+      port.emit({ t: 'ping', n: ++pings })
+      remaining -= step
+    }
+  }
+
+  return { clock, fake, port, runtime, exitCodes, advanceAlive }
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +255,7 @@ describe('message handling', () => {
   it('arms and disarms the hold loop, and reports state and releases upward', () => {
     const h = runtimeHarness()
     h.port.emit({ t: 'arm', config: config() })
-    h.clock.advance(300)
+    h.advanceAlive(300)
     expect(h.fake.count('keyDown:key-w')).toBe(1)
 
     const states = h.port.sent.filter((message) => message.t === 'state')
@@ -251,9 +281,10 @@ describe('message handling', () => {
     const h = runtimeHarness()
     h.port.emit({ t: 'arm' })
     h.port.emit({ hello: 'world' })
-    h.clock.advance(1_000)
+    h.advanceAlive(1_000)
     expect(h.fake.calls).toHaveLength(0)
-    expect(h.port.sent).toHaveLength(0)
+    // A live main is still being answered; nothing else went out.
+    expect(h.port.sent.every((message) => message.t === 'pong')).toBe(true)
   })
 })
 
@@ -261,7 +292,7 @@ describe('heartbeat', () => {
   it('releases and exits when main goes quiet for the timeout', () => {
     const h = runtimeHarness()
     h.port.emit({ t: 'arm', config: config() })
-    h.clock.advance(300)
+    h.advanceAlive(300)
     expect(h.fake.count('keyDown:key-w')).toBe(1)
 
     h.port.emit({ t: 'ping', n: 1 })
@@ -286,9 +317,38 @@ describe('heartbeat', () => {
     expect(h.fake.count('releaseAll')).toBe(0)
   })
 
-  it('does not fire before main has ever pinged', () => {
+  // Regression: the watchdog used to stay disabled until the first ping
+  // arrived, so a main that died in the ~100ms between forking the injector and
+  // its first ping left an armed injector with no liveness deadline at all, and
+  // whatever it pressed next stayed down.
+  it('is armed from process start, so a main that never pings still gets outlived', () => {
     const h = runtimeHarness()
-    h.clock.advance(60_000)
+    h.port.emit({ t: 'arm', config: config() })
+    // Main dies here: no ping ever arrives. The key still goes down, because
+    // the loop is armed and the target is frontmost.
+    h.clock.advance(HEARTBEAT_TIMEOUT_MS - 50)
+    expect(h.fake.count('keyDown:key-w')).toBe(1)
+    expect(h.exitCodes).toHaveLength(0)
+
+    h.clock.advance(50)
+    expect(h.fake.count('keyUp:key-w')).toBe(1)
+    expect(h.fake.count('releaseAll')).toBe(1)
+    expect(h.fake.count('dispose')).toBe(1)
+    expect(h.exitCodes).toEqual([1])
+  })
+
+  it('outlives a main that never sends anything at all, armed or not', () => {
+    const h = runtimeHarness()
+    h.clock.advance(HEARTBEAT_TIMEOUT_MS)
+    expect(h.exitCodes).toEqual([1])
+  })
+
+  it('counts any message from main as proof of life, not only a ping', () => {
+    const h = runtimeHarness()
+    for (let i = 0; i < 10; i++) {
+      h.clock.advance(HEARTBEAT_TIMEOUT_MS - 50)
+      h.port.emit({ t: 'settings', settings: settings() })
+    }
     expect(h.exitCodes).toHaveLength(0)
   })
 
@@ -298,6 +358,94 @@ describe('heartbeat', () => {
     h.clock.advance(10_000)
     expect(h.exitCodes).toEqual([1])
     expect(h.fake.count('releaseAll')).toBe(1)
+  })
+})
+
+describe('self-disarm', () => {
+  // Regression: the loop can end its own session (the injector-side max session
+  // cap), but a self-disarm was invisible on the wire. Main read the last state
+  // frame as an ordinary focus loss, soft-released, and stayed armed forever
+  // against a loop whose scheduler had stopped, while this process happily went
+  // on answering pings. Ending the process is a signal main already handles.
+  it('releases and exits when the loop ends its own session', () => {
+    const h = runtimeHarness()
+    h.port.emit({ t: 'settings', settings: settings({ maxSessionMinutes: 1 }) })
+    h.port.emit({ t: 'arm', config: config() })
+    h.advanceAlive(300)
+    expect(h.fake.count('keyDown:key-w')).toBe(1)
+    expect(h.exitCodes).toHaveLength(0)
+
+    h.advanceAlive(61_000)
+    expect(h.fake.count('keyUp:key-w')).toBe(1)
+    // The loop's own teardown and the shutdown path both post the global
+    // release. Deliberate belt and braces: `releaseAll` is idempotent.
+    expect(h.fake.count('releaseAll')).toBeGreaterThan(0)
+    expect(h.fake.count('dispose')).toBe(1)
+    expect(h.runtime.shutdownCount).toBe(1)
+    expect(h.exitCodes).toEqual([0])
+  })
+
+  it('does not exit when main is the one asking for the disarm', () => {
+    const h = runtimeHarness()
+    h.port.emit({ t: 'arm', config: config() })
+    h.advanceAlive(300)
+    h.port.emit({ t: 'disarm', reason: 'user-stop' })
+    expect(h.fake.count('keyUp:key-w')).toBe(1)
+    // Main owns the teardown from here: it saw `released` and kills us itself.
+    expect(h.exitCodes).toHaveLength(0)
+    expect(h.runtime.shutdownCount).toBe(0)
+  })
+})
+
+describe('blocked targets', () => {
+  const blockedReport: ForegroundBlockingReport = {
+    ok: false,
+    severity: 'blocked',
+    app: TARGET,
+    self: { state: 'known-not-elevated', lastError: null, reason: 'the token reports not elevated' },
+    target: { state: 'known-elevated', lastError: null, reason: 'the token reports elevated' },
+    message:
+      'Minecraft is running as administrator, restart KeyPress Ultimate as administrator.',
+  }
+
+  it('forwards an elevated target to main as a blocked message, once', () => {
+    let calls = 0
+    const h = runtimeHarness((native) => ({
+      ...native,
+      describeForegroundBlocking: (): ForegroundBlockingReport => {
+        calls++
+        return blockedReport
+      },
+    }))
+    h.port.emit({ t: 'arm', config: config() })
+    h.advanceAlive(5_000)
+
+    const blocked = h.port.sent.filter((message) => message.t === 'blocked')
+    expect(blocked).toEqual([
+      {
+        t: 'blocked',
+        code: 'elevated-target',
+        message: blockedReport.message,
+        appName: 'Minecraft',
+      },
+    ])
+    // Asked once per target, not once per 25ms tick.
+    expect(calls).toBe(1)
+  })
+
+  it('says nothing when the adapter reports the target is reachable', () => {
+    const h = runtimeHarness((native) => ({
+      ...native,
+      describeForegroundBlocking: (): ForegroundBlockingReport => ({
+        ...blockedReport,
+        ok: true,
+        severity: 'ok',
+        message: 'Minecraft looks reachable.',
+      }),
+    }))
+    h.port.emit({ t: 'arm', config: config() })
+    h.advanceAlive(5_000)
+    expect(h.port.sent.some((message) => message.t === 'blocked')).toBe(false)
   })
 })
 
@@ -319,7 +467,7 @@ describe('failsafe handlers', () => {
       const proc = createFakeProcess()
       installFailsafeHandlers(h.runtime, proc)
       h.port.emit({ t: 'arm', config: config() })
-      h.clock.advance(300)
+      h.advanceAlive(300)
       expect(h.fake.count('keyDown:key-w')).toBe(1)
 
       proc.fire(event)
@@ -343,7 +491,7 @@ describe('failsafe handlers', () => {
     const proc = createFakeProcess()
     installFailsafeHandlers(h.runtime, proc)
     h.port.emit({ t: 'arm', config: config() })
-    h.clock.advance(300)
+    h.advanceAlive(300)
 
     proc.fire('exit')
     expect(h.fake.count('releaseAll')).toBe(1)
@@ -369,11 +517,11 @@ describe('failsafe handlers', () => {
     const proc = createFakeProcess()
     installFailsafeHandlers(h.runtime, proc)
     h.port.emit({ t: 'arm', config: config() })
-    h.clock.advance(300)
+    h.advanceAlive(300)
     proc.fire('SIGINT')
 
     const after = h.fake.calls.length
-    h.clock.advance(10_000)
+    h.advanceAlive(10_000)
     expect(h.fake.calls).toHaveLength(after)
   })
 })
@@ -400,7 +548,10 @@ describe('port failures', () => {
     })
     runtime.start()
     broken.emit({ t: 'arm', config: config() })
-    clock.advance(300)
+    for (let i = 0; i < 3; i++) {
+      clock.advance(HEARTBEAT_INTERVAL_MS)
+      broken.emit({ t: 'ping', n: i })
+    }
     expect(fake.count('keyDown:key-w')).toBe(1)
 
     runtime.shutdown('signal', 0)

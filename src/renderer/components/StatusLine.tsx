@@ -1,6 +1,6 @@
 import type { JSX } from 'react'
-import type { AppInfo, HoldMode, SessionState } from '../../shared/types'
-import { getKeyById, getMouseButtonById } from '../../shared/keys'
+import type { AppInfo, HoldMode, Platform, SessionState } from '../../shared/types'
+import { getKeyById, getMouseButtonById, platformLabel } from '../../shared/keys'
 import { useShallow } from 'zustand/react/shallow'
 import { describeStartRefusal, useAppStore, type AppState } from '../state/store'
 import styles from './StatusLine.module.css'
@@ -41,7 +41,7 @@ interface StatusLines {
 export function selectLines(state: AppState): StatusLines {
   const { session } = state
   const targetLabel = describeTargets(state.targets, state.apps)
-  const selection = describeSelection(state.keyIds, state.buttonIds)
+  const selection = describeSelection(state.keyIds, state.buttonIds, state.platform)
   const focused = session.focusedApp
 
   switch (session.phase) {
@@ -91,9 +91,21 @@ function verbFor(mode: HoldMode, count: number): string {
   return plural ? 'are held down' : 'is held down'
 }
 
-export function describeSelection(keyIds: readonly string[], buttonIds: readonly string[]): string {
+/**
+ * The names of the selected inputs, in the legends this platform prints. A Mac
+ * user who selected the key beside the space bar reads "\u2318 Command is held
+ * down", which is what their keycap says and what the board shows.
+ */
+export function describeSelection(
+  keyIds: readonly string[],
+  buttonIds: readonly string[],
+  platform: Platform,
+): string {
   const names = [
-    ...keyIds.map((id) => getKeyById(id)?.label ?? id),
+    ...keyIds.map((id) => {
+      const def = getKeyById(id)
+      return def === undefined ? id : platformLabel(def, platform)
+    }),
     ...buttonIds.map((id) => getMouseButtonById(id)?.label ?? id),
   ]
   if (names.length === 0) return 'Nothing'

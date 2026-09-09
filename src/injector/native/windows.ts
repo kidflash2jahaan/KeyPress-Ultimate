@@ -466,8 +466,12 @@ export interface ScanEncoding {
  * the right record instead of injecting 0xE0 as if it were a key.
  *
  * 0xE1 (only the Pause key, which physically emits 0xE1 0x1D 0x45) cannot be expressed
- * in one INPUT record at all. We send the bare 0x45 and do NOT set the extended flag,
- * matching Chromium. R-04 asks the tester whether anything receives it.
+ * in one INPUT record at all, and the bare 0x45 that is left over is NOT Pause: it is
+ * VK_NUMLOCK, because kbdus maps ausVK[0x45] to VK_NUMLOCK. So `data/keys.json` no longer
+ * gives `key-pause` a scan code at all (`winScanCode: null`), and `encodeKey` sends it by
+ * virtual key instead. This branch keeps the 0xE1 handling only for a raw table value
+ * that reaches it some other way, and it still refuses to set the extended flag, because
+ * KEYEVENTF_EXTENDEDKEY means 0xE0 and never 0xE1.
  */
 export function encodeScan(raw: number, extendedHint = false): ScanEncoding {
   const value = raw >>> 0
@@ -497,9 +501,13 @@ export interface KeyEncoding {
  * documented fallback for titles that ignore injected scancodes; it is reached only when
  * `Settings.windowsUseVirtualKeys` is on, or when the key has no scan code at all.
  *
- * Throws, loudly and by key id, when neither code exists. `key-fn` is the one key in
- * `data/keys.json` with `winScanCode: null` and it is macOS-only, so reaching this on
- * Windows means the UI offered a key it should have drawn as unavailable.
+ * `winScanCode: null` is therefore load-bearing, not just absence. Two keys use it:
+ * `key-fn` (macOS-only, has no Windows codes either way) and `key-pause`, which has no
+ * expressible scan code because the hardware sequence is 0xE1 0x1D 0x45 and the bare 0x45
+ * left over is Num Lock. Both reach the virtual-key branch below on purpose.
+ *
+ * Throws, loudly and by key id, when neither code exists. That is `key-fn` on Windows,
+ * which means the UI offered a key it should have drawn as unavailable.
  */
 export function encodeKey(key: KeyDef, useVirtualKeys = false): KeyEncoding {
   const hasScan = key.winScanCode !== null && key.winScanCode !== 0
@@ -931,15 +939,50 @@ export interface ElevationReport {
   reason: string
 }
 
+export type BlockingSeverity = 'ok' | 'warn' | 'blocked' | 'info'
+
 export interface ForegroundBlockingReport {
   /** True only when we have positive reason to think injection will land. */
   ok: boolean
-  severity: 'ok' | 'warn' | 'blocked' | 'info'
+  severity: BlockingSeverity
   app: AppInfo | null
   self: ElevationReport
   target: ElevationReport
   /** Ready to render. No em dashes, no jargon the user cannot act on. */
   message: string
+}
+
+/**
+ * The narrow, platform-neutral shape the hold loop and the IPC layer consume.
+ *
+ * `ForegroundBlockingReport` carries Win32 detail (two `ElevationReport`s, a whole
+ * `AppInfo`) that only a Windows diagnostics panel wants. This is the part a caller can
+ * act on without knowing anything about tokens or integrity levels, and it is
+ * deliberately free of Windows-only types so a cross-platform caller can hold it.
+ *
+ * The contract for a caller, and the ONLY branch it should make:
+ *
+ *   `code === 'injection-blocked'`  ->  do not press. Report `message` and stop.
+ *   `code === null && !ok`          ->  press anyway, but surface `message` as a warning.
+ *   `ok`                            ->  press. `message` is informational.
+ *
+ * `code` is non-null only for the one case we are actually certain about (the target's
+ * token reports elevated while ours does not). `probably-elevated` is a warning and
+ * never an abort, because a denied `OpenProcess` is also what anti-cheat looks like and
+ * refusing to fire there would break the app for the games it exists to serve.
+ */
+export interface InjectionBlockingReport {
+  /** True only when we have positive reason to think injection will land. */
+  ok: boolean
+  severity: BlockingSeverity
+  /** The injector error code to report, or null when there is nothing to abort for. */
+  code: 'injection-blocked' | null
+  /** Ready to render, already user-facing. Never empty. */
+  message: string
+  appName: string | null
+  appPid: number | null
+  /** True when the check could not run at all (adapter not initialised, FFI threw). */
+  unavailable: boolean
 }
 
 /** One enumerated application, before it is narrowed to the shared `AppInfo` shape. */
@@ -970,9 +1013,144 @@ export interface WindowsDiagnostics {
   heldKeyIds: string[]
   heldButtonIds: MouseButtonId[]
   lastSendFailure: SendFailure | null
+  /** The last `describeInjectionBlocking()` answer, or null if it was never called. */
+  lastBlockingCheck: InjectionBlockingReport | null
   timerPeriodDepth: number
   winmmAvailable: boolean
   winmmError: string | null
+}
+
+/** The honest "we did not look" report, shared so every caller emits the same shape. */
+export const UNCHECKED_ELEVATION: ElevationReport = Object.freeze({
+  state: 'unknown',
+  lastError: null,
+  reason: 'not checked',
+})
+
+/** How long a per-pid blocking answer is reused. See `describeInjectionBlocking`. */
+export const BLOCKING_CACHE_MS = 3_000
+
+/**
+ * The whole UIPI decision, as a pure function of the three facts it depends on.
+ *
+ * It is separate from `describeForegroundBlocking()` because that method needs a live
+ * user32 to gather its inputs and so can only ever run on Windows, while the decision
+ * itself is the part that can be wrong, and it can be proved off-Windows. Every branch
+ * below has a test in `windows.test.ts`.
+ *
+ * The ordering matters and is not arbitrary:
+ *
+ *  1. No foreground window. Nothing to decide. `info`, and NOT an abort: focus is about
+ *     to change, which is the normal state a fraction of a second before a game takes
+ *     over the screen.
+ *  2. The target's token says elevated while ours does not. This is the one certainty.
+ *     UIPI blocks it, `SendInput` will report success anyway, and nothing will happen.
+ *  3. We are elevated. High integrity can inject into equal or lower, so this is fine
+ *     for every ordinary target. The exception is a target we still cannot open even
+ *     from high integrity, which means System, a protected process, or anti-cheat, and
+ *     that is a warning rather than an all-clear. Checking (2) and this exception before
+ *     the blanket all-clear is what keeps the "running as administrator" answer honest.
+ *  4. We could not inspect the target at all. Usually elevation, sometimes anti-cheat.
+ *     A warning, never an abort: refusing to fire here would break exactly the games
+ *     this app exists for.
+ */
+export function classifyForegroundBlocking(
+  app: AppInfo | null,
+  self: ElevationReport,
+  target: ElevationReport,
+): ForegroundBlockingReport {
+  if (!app) {
+    return {
+      ok: false,
+      severity: 'info',
+      app: null,
+      self,
+      target,
+      message: 'There is no foreground window right now, so there is nothing to check.',
+    }
+  }
+
+  const selfElevated = self.state === 'known-elevated'
+
+  if (!selfElevated && target.state === 'known-elevated') {
+    return {
+      ok: false,
+      severity: 'blocked',
+      app,
+      self,
+      target,
+      message:
+        `${app.name} is running as administrator, restart KeyPress Ultimate as ` +
+        `administrator. Windows blocks input from a normal app into an elevated one, ` +
+        `so the keys will not reach ${app.name} until both are running the same way.`,
+    }
+  }
+
+  if (selfElevated) {
+    if (target.state === 'probably-elevated') {
+      return {
+        ok: false,
+        severity: 'warn',
+        app,
+        self,
+        target,
+        message:
+          `KeyPress Ultimate is already running as administrator, but Windows still would ` +
+          `not let it inspect ${app.name}. That normally means ${app.name} is a system ` +
+          `process or is protected by anti-cheat, and keys may silently do nothing.`,
+      }
+    }
+    return {
+      ok: true,
+      severity: 'ok',
+      app,
+      self,
+      target,
+      message: `KeyPress Ultimate is running as administrator, so it can inject into ${app.name}.`,
+    }
+  }
+
+  if (target.state === 'probably-elevated') {
+    return {
+      ok: false,
+      severity: 'warn',
+      app,
+      self,
+      target,
+      message:
+        `Windows would not let KeyPress Ultimate inspect ${app.name}, which usually means ` +
+        `it is running as administrator or is protected by anti-cheat. Keys may silently ` +
+        `do nothing. If nothing happens, restart KeyPress Ultimate as administrator.`,
+    }
+  }
+
+  return {
+    ok: true,
+    severity: 'ok',
+    app,
+    self,
+    target,
+    message: `${app.name} looks reachable.`,
+  }
+}
+
+/**
+ * Narrow a full report to the shape a caller acts on.
+ *
+ * `code` is set for `blocked` and nothing else. That is the whole point of the narrowing:
+ * a caller should not have to re-derive "is this an abort" from a severity string, and
+ * it must not abort on `warn`.
+ */
+export function narrowBlockingReport(report: ForegroundBlockingReport): InjectionBlockingReport {
+  return {
+    ok: report.ok,
+    severity: report.severity,
+    code: report.severity === 'blocked' ? 'injection-blocked' : null,
+    message: report.message,
+    appName: report.app ? report.app.name : null,
+    appPid: report.app ? report.app.pid : null,
+    unavailable: false,
+  }
 }
 
 // =====================================================================================
@@ -1016,6 +1194,8 @@ export class WindowsNativeInput implements NativeInput, NativeInputExtras {
   private lastSendFailure: SendFailure | null = null
   private selfElevationCache: ElevationReport | null = null
   private lastEnumErrors: string[] = []
+  private blockingCache: { pid: number; at: number; report: ForegroundBlockingReport } | null = null
+  private lastBlockingCheck: InjectionBlockingReport | null = null
 
   /** Insertion-ordered, so release order is press order reversed. */
   private readonly heldKeys = new Map<string, HeldKey>()
@@ -1076,6 +1256,7 @@ export class WindowsNativeInput implements NativeInput, NativeInputExtras {
       // dispose() runs on exit paths; it must never be the thing that throws.
     }
     while (this.timerPeriodDepth > 0) this.endHighResolutionTimers()
+    this.blockingCache = null
     this.disposed = true
   }
 
@@ -1750,6 +1931,15 @@ export class WindowsNativeInput implements NativeInput, NativeInputExtras {
       }
     }
     const tokenHandle = token[0]
+    if (isNullHandle(tokenHandle)) {
+      // OpenProcessToken said it succeeded but handed back nothing. Never seen, but
+      // CloseHandle(NULL) raises an exception under a debugger, so do not risk it.
+      return {
+        state: 'unknown',
+        lastError: w.GetLastError(),
+        reason: 'OpenProcessToken succeeded but returned a null handle',
+      }
+    }
     try {
       const buf = Buffer.alloc(4) // TOKEN_ELEVATION { DWORD TokenIsElevated; }
       const returned: OutNumber = [0]
@@ -1776,12 +1966,18 @@ export class WindowsNativeInput implements NativeInput, NativeInputExtras {
    *
    * `GetCurrentProcess()` returns a pseudo-handle, (HANDLE)-1, which must never be
    * passed to CloseHandle. `tokenElevationOf` only closes the token it opened.
+   *
+   * Only a DEFINITIVE answer is cached. Caching `unknown` would pin a transient failure
+   * for the life of the process, and this value decides whether we tell the user to
+   * restart as administrator, so a wrong sticky answer is worse than asking again.
    */
   getSelfElevation(): ElevationReport {
     if (this.selfElevationCache) return this.selfElevationCache
     const w = this.win()
     const report = this.tokenElevationOf(w.GetCurrentProcess())
-    this.selfElevationCache = report
+    if (report.state === 'known-elevated' || report.state === 'known-not-elevated') {
+      this.selfElevationCache = report
+    }
     return report
   }
 
@@ -1826,65 +2022,74 @@ export class WindowsNativeInput implements NativeInput, NativeInputExtras {
    * app would confidently say "holding W" into a void.
    */
   describeForegroundBlocking(): ForegroundBlockingReport {
-    const unknown: ElevationReport = { state: 'unknown', lastError: null, reason: 'not checked' }
     const app = this.getForegroundApplication()
-    if (!app) {
-      return {
-        ok: false,
-        severity: 'info',
-        app: null,
-        self: unknown,
-        target: unknown,
-        message: 'There is no foreground window right now, so there is nothing to check.',
-      }
-    }
-    const self = this.getSelfElevation()
-    const target = this.getProcessElevation(app.pid)
+    if (!app) return classifyForegroundBlocking(null, UNCHECKED_ELEVATION, UNCHECKED_ELEVATION)
+    return classifyForegroundBlocking(app, this.getSelfElevation(), this.getProcessElevation(app.pid))
+  }
 
-    if (self.state === 'known-elevated') {
-      return {
+  /**
+   * The same answer, narrowed for the hold loop, cheap enough to call on a transition,
+   * and guaranteed not to throw.
+   *
+   * Cost when it misses the cache: `GetForegroundWindow`, `GetWindowThreadProcessId`,
+   * one `OpenProcess`/`QueryFullProcessImageNameW`/`CloseHandle` for the path,
+   * `GetWindowTextW`, then `OpenProcess`/`OpenProcessToken`/`GetTokenInformation` and two
+   * `CloseHandle`s for the elevation. Call it once per focus transition, never per tick.
+   *
+   * A short cache keyed on the foreground pid absorbs an alt-tab storm without going
+   * stale: elevation cannot change for the life of a process, and the TTL is only there
+   * so a recycled pid cannot pin a wrong answer forever.
+   *
+   * Never throws, by design. It runs on the press path, where an exception would be a
+   * worse outcome than the silence it exists to prevent, so an uninitialised adapter or
+   * an FFI failure comes back as `unavailable` and the caller presses anyway.
+   */
+  describeInjectionBlocking(): InjectionBlockingReport {
+    let report: ForegroundBlockingReport
+    try {
+      const app = this.getForegroundApplication()
+      const cached = this.blockingCache
+      if (
+        cached &&
+        app !== null &&
+        cached.pid === app.pid &&
+        Date.now() - cached.at < BLOCKING_CACHE_MS
+      ) {
+        report = cached.report
+      } else {
+        report = app
+          ? classifyForegroundBlocking(app, this.getSelfElevation(), this.getProcessElevation(app.pid))
+          : classifyForegroundBlocking(null, UNCHECKED_ELEVATION, UNCHECKED_ELEVATION)
+        this.blockingCache = app ? { pid: app.pid, at: Date.now(), report } : null
+      }
+    } catch (err) {
+      const narrowed: InjectionBlockingReport = {
         ok: true,
-        severity: 'ok',
-        app,
-        self,
-        target,
-        message: `KeyPress Ultimate is running as administrator, so it can inject into ${app.name}.`,
-      }
-    }
-    if (target.state === 'known-elevated') {
-      return {
-        ok: false,
-        severity: 'blocked',
-        app,
-        self,
-        target,
+        severity: 'info',
+        code: null,
         message:
-          `${app.name} is running as administrator, restart KeyPress Ultimate as ` +
-          `administrator. Windows blocks input from a normal app into an elevated one, ` +
-          `so the keys will not reach ${app.name} until both are running the same way.`,
+          `KeyPress Ultimate could not check whether Windows will let it send keys ` +
+          `(${err instanceof Error ? err.message : String(err)}). It will try anyway.`,
+        appName: null,
+        appPid: null,
+        unavailable: true,
       }
+      this.lastBlockingCheck = narrowed
+      return narrowed
     }
-    if (target.state === 'probably-elevated') {
-      return {
-        ok: false,
-        severity: 'warn',
-        app,
-        self,
-        target,
-        message:
-          `Windows would not let KeyPress Ultimate inspect ${app.name}, which usually means ` +
-          `it is running as administrator or is protected by anti-cheat. Keys may silently ` +
-          `do nothing. If nothing happens, restart KeyPress Ultimate as administrator.`,
-      }
-    }
-    return {
-      ok: true,
-      severity: 'ok',
-      app,
-      self,
-      target,
-      message: `${app.name} looks reachable.`,
-    }
+    const narrowed = narrowBlockingReport(report)
+    this.lastBlockingCheck = narrowed
+    return narrowed
+  }
+
+  /** The last answer `describeInjectionBlocking()` produced, for a bug report. */
+  getLastBlockingCheck(): InjectionBlockingReport | null {
+    return this.lastBlockingCheck
+  }
+
+  /** Drop the per-pid blocking cache. For tests and for an explicit "re-check" button. */
+  clearBlockingCache(): void {
+    this.blockingCache = null
   }
 
   /**
@@ -1954,6 +2159,7 @@ export class WindowsNativeInput implements NativeInput, NativeInputExtras {
       heldKeyIds: this.getHeldKeyIds(),
       heldButtonIds: this.getHeldButtonIds(),
       lastSendFailure: this.lastSendFailure,
+      lastBlockingCheck: this.lastBlockingCheck,
       timerPeriodDepth: this.timerPeriodDepth,
       winmmAvailable: this.bindings?.timeBeginPeriod != null,
       winmmError: this.bindings ? this.bindings.winmmError : null,
@@ -2069,6 +2275,8 @@ export const __test = Object.freeze({
   probeStructLayout,
   assertStructLayout,
   describeSendInputError,
+  classifyForegroundBlocking,
+  narrowBlockingReport,
   basename,
   prettyName,
   identityFor,

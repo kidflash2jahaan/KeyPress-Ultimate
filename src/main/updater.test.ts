@@ -835,6 +835,85 @@ describe('download()', () => {
     expect(last?.bytesDone).toBe(PAYLOAD.length)
   })
 
+  it('never reports a finished download before the checksum has been compared', async () => {
+    // The renderer derives "Downloaded and verified." from a progress event
+    // that reached the total, so a body which streams to completion and then
+    // fails the hash must never produce one. Content-length is set on purpose:
+    // the last chunk takes bytesDone all the way to the declared total, which
+    // is exactly the case that used to announce a verification that never ran.
+    const { fetch } = makeFetch({
+      'https://downloads.test/mac.zip': {
+        body: PAYLOAD,
+        headers: { 'content-length': String(PAYLOAD.length) },
+      },
+    })
+    const fsFake = makeFs()
+    const updater = createUpdater(baseDeps({ fetch, fs: fsFake.fs }))
+
+    const seen: { percent: number; bytesDone: number; bytesTotal: number }[] = []
+    await expect(
+      updater.download(downloadableInfo('9'.repeat(64)), (p) => seen.push(p)),
+    ).rejects.toThrow(/checksum/i)
+
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.some((p) => p.percent >= 100)).toBe(false)
+    expect(seen.some((p) => p.bytesTotal > 0 && p.bytesDone >= p.bytesTotal)).toBe(false)
+    expect(fsFake.files.size).toBe(0)
+  })
+
+  it('emits the completed event once, last, and only on the verified path', async () => {
+    const { fetch } = makeFetch({
+      'https://downloads.test/mac.zip': {
+        body: PAYLOAD,
+        headers: { 'content-length': String(PAYLOAD.length) },
+      },
+    })
+    const fsFake = makeFs()
+    const updater = createUpdater(baseDeps({ fetch, fs: fsFake.fs }))
+
+    const seen: { percent: number; bytesDone: number; bytesTotal: number }[] = []
+    // The staging dir is deleted the instant verification fails, so a completed
+    // event observed while the staged file is still on disk can only have come
+    // from the path where the hash already matched.
+    const stagedAtCompletion: boolean[] = []
+    const dest = await updater.download(downloadableInfo(), (p) => {
+      seen.push(p)
+      if (p.percent === 100) stagedAtCompletion.push(fsFake.files.size > 0)
+    })
+
+    const completed = seen.filter((p) => p.percent === 100)
+    expect(completed).toHaveLength(1)
+    expect(seen[seen.length - 1]?.percent).toBe(100)
+    expect(stagedAtCompletion).toEqual([true])
+    expect(fsFake.text(dest)).toBe(PAYLOAD)
+  })
+
+  it('reports no completed progress when the connection drops mid-stream', async () => {
+    const dropping: UpdaterDeps['fetch'] = async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (name: string) => (name.toLowerCase() === 'content-length' ? '35' : null) },
+      text: async () => '',
+      body: {
+        async *[Symbol.asyncIterator]() {
+          yield new TextEncoder().encode(PAYLOAD.slice(0, 10))
+          throw new Error('socket hung up')
+        },
+      },
+    })
+    const fsFake = makeFs()
+    const updater = createUpdater(baseDeps({ fetch: dropping, fs: fsFake.fs }))
+
+    const seen: { percent: number }[] = []
+    await expect(updater.download(downloadableInfo(), (p) => seen.push(p))).rejects.toThrow(
+      /socket hung up/,
+    )
+
+    expect(seen.some((p) => p.percent >= 100)).toBe(false)
+    expect(fsFake.removed).toContain('/tmp/keypress-ultimate-update-4242')
+    expect(fsFake.files.size).toBe(0)
+  })
+
   it('deletes the file and throws when the checksum does not match', async () => {
     const { fetch } = makeFetch({ 'https://downloads.test/mac.zip': { body: PAYLOAD } })
     const fsFake = makeFs()

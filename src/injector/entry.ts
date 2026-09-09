@@ -11,7 +11,7 @@
  * crosses the boundary.
  *
  *   main -> injector   arm | disarm | ping | settings
- *   injector -> main   state | pong | error | released
+ *   injector -> main   state | pong | error | released | blocked
  *
  * Every exit path in this file funnels into one idempotent `shutdown()`, which
  * calls `HoldLoop.releaseAll()` exactly once no matter how many handlers fire.
@@ -134,7 +134,14 @@ export function createInjectorRuntime(options: InjectorRuntimeOptions): Injector
   const clock = options.clock ?? realClock
   const port = options.port
   let watchdog: Scheduler | null = null
-  let lastPingAt: number | null = null
+  /**
+   * When main was last known to be alive. Seeded at `start()`, not at the first
+   * ping: an injector that is armed and then never heard from again must have a
+   * running deadline from the moment it exists, or a main that dies inside the
+   * gap before its first ping leaves an armed injector with no liveness check
+   * at all.
+   */
+  let lastHeardFromMainAt: number | null = null
   let shutdownCount = 0
   let started = false
 
@@ -167,6 +174,22 @@ export function createInjectorRuntime(options: InjectorRuntimeOptions): Injector
         focusedPid: state.focusedPid,
       }),
     onReleased: (count) => post({ t: 'released', count }),
+    onBlocked: (blocked) =>
+      post({
+        t: 'blocked',
+        code: blocked.code,
+        message: blocked.message,
+        appName: blocked.appName,
+      }),
+    // The loop ended its own session, which main did not ask for and cannot
+    // see. Leaving would be enough on its own, but the process has no reason to
+    // stay: its session is over, and main forks a fresh injector per arm. An
+    // exit is a signal main already handles, so it cannot stay armed against a
+    // loop that has stopped ticking.
+    onSelfDisarm: (reason) => {
+      log(`hold loop ended its own session (${reason}), releasing and exiting`)
+      shutdown(reason, 0)
+    },
     onError: (code, message) => post({ t: 'error', code, message }),
     onLog: options.onLog,
   })
@@ -177,11 +200,13 @@ export function createInjectorRuntime(options: InjectorRuntimeOptions): Injector
       log(`ignoring unrecognised message: ${JSON.stringify(raw)}`)
       return
     }
-    // Any message from main counts as proof of life, but only a ping arms the
-    // watchdog, so a quiet main that never pings cannot be killed by it.
+    // Any message from main counts as proof of life, pings included. The
+    // deadline is never *disarmed* by silence, only pushed forward by contact:
+    // a main that stops talking is a main this process has to outlive by as
+    // little as possible.
+    lastHeardFromMainAt = clock.now()
     switch (message.t) {
       case 'ping':
-        lastPingAt = clock.now()
         post({ t: 'pong', n: message.n })
         return
       case 'arm':
@@ -197,10 +222,11 @@ export function createInjectorRuntime(options: InjectorRuntimeOptions): Injector
   }
 
   function checkHeartbeat(): void {
-    if (lastPingAt === null) return
-    const silentFor = clock.now() - lastPingAt
+    // Null only before `start()` has run, i.e. before the watchdog exists.
+    if (lastHeardFromMainAt === null) return
+    const silentFor = clock.now() - lastHeardFromMainAt
     if (silentFor < HEARTBEAT_TIMEOUT_MS) return
-    log(`no ping from main for ${Math.round(silentFor)}ms, releasing and exiting`)
+    log(`nothing from main for ${Math.round(silentFor)}ms, releasing and exiting`)
     shutdown('heartbeat-timeout', 1)
   }
 
@@ -230,6 +256,11 @@ export function createInjectorRuntime(options: InjectorRuntimeOptions): Injector
       if (started) return
       started = true
       port.on('message', (event) => handleMessage(event.data))
+      // The deadline starts now, before a single message has arrived. Waiting
+      // for the first ping would leave the window between fork and that ping
+      // (one HEARTBEAT_INTERVAL_MS, and `arm` lands inside it) completely
+      // unwatched, which is exactly when a main that dies strands a held key.
+      lastHeardFromMainAt = clock.now()
       watchdog = createScheduler({
         periodMs: HEARTBEAT_INTERVAL_MS,
         clock,

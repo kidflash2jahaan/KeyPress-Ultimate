@@ -1,8 +1,32 @@
 .controls {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px 20px;
+  gap: 10px;
+  padding: 14px 20px 16px;
+  min-width: 0;
+}
+
+/*
+ * The panel fills the band: the segmented control and its intervals down the
+ * left, the sentence that explains the chosen mode beside them. Stacking all
+ * three down the left edge is what left a third of the lower half of the
+ * window empty to the right of this panel and under it.
+ *
+ * `align-content: center` puts the leftover height above and below the block
+ * instead of all of it underneath, so the column reads as spaced rather than
+ * as unfinished.
+ */
+.panel {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    'segments blurb'
+    'fields blurb';
+  align-content: center;
+  align-items: start;
+  column-gap: 28px;
+  row-gap: 14px;
   min-width: 0;
 }
 
@@ -17,6 +41,7 @@
 }
 
 .fieldset {
+  grid-area: segments;
   margin: 0;
   padding: 0;
   border: 0;
@@ -83,8 +108,9 @@
 }
 
 .blurb {
+  grid-area: blurb;
   margin: 0;
-  max-width: 56ch;
+  max-width: 52ch;
   color: var(--text-dim);
   font-family: var(--font-sans);
   font-size: 12.5px;
@@ -94,10 +120,10 @@
 /* --- interval fields ----------------------------------------------------- */
 
 .fields {
+  grid-area: fields;
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
-  padding-top: 2px;
 }
 
 .field {

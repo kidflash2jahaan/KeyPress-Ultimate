@@ -23,7 +23,8 @@
  *      the app's whole lifetime is rude and unnecessary.
  */
 import type { GlobalShortcut } from 'electron'
-import { getKeyById } from '@shared/keys'
+import { getKeyById, platformLabel } from '@shared/keys'
+import type { Platform } from '@shared/types'
 
 /**
  * The slice of Electron's `globalShortcut` this module uses. Injected so the
@@ -245,51 +246,155 @@ export function takenMessage(accelerator: string): string {
 // Overlap with the keys the user asked to hold
 // ---------------------------------------------------------------------------
 
-const ACCELERATOR_TOKEN_TO_KEY_IDS: Record<string, string[]> = {
-  command: ['key-left-meta', 'key-right-meta'],
-  cmd: ['key-left-meta', 'key-right-meta'],
-  super: ['key-left-meta', 'key-right-meta'],
-  meta: ['key-left-meta', 'key-right-meta'],
-  control: ['key-left-ctrl', 'key-right-ctrl'],
-  ctrl: ['key-left-ctrl', 'key-right-ctrl'],
-  commandorcontrol: ['key-left-meta', 'key-right-meta', 'key-left-ctrl', 'key-right-ctrl'],
-  cmdorctrl: ['key-left-meta', 'key-right-meta', 'key-left-ctrl', 'key-right-ctrl'],
-  alt: ['key-left-alt', 'key-right-alt'],
-  option: ['key-left-alt', 'key-right-alt'],
-  altgr: ['key-right-alt'],
-  shift: ['key-left-shift', 'key-right-shift'],
+const META_KEYS = ['key-left-meta', 'key-right-meta']
+const CTRL_KEYS = ['key-left-ctrl', 'key-right-ctrl']
+
+/**
+ * Modifier tokens to the physical keys they occupy. `CommandOrControl` resolves
+ * against the running platform, exactly the way Electron resolves it: Command
+ * on macOS, Control on Windows, never both. Unioning the two used to make the
+ * Windows key permanently unholdable on Windows and Control unholdable on
+ * macOS, for a combination that does not contain them there.
+ */
+function modifierTokenToKeyIds(token: string, platform: Platform): string[] | undefined {
+  switch (token) {
+    case 'command':
+    case 'cmd':
+    case 'super':
+    case 'meta':
+      return META_KEYS
+    case 'control':
+    case 'ctrl':
+      return CTRL_KEYS
+    case 'commandorcontrol':
+    case 'cmdorctrl':
+      return platform === 'darwin' ? META_KEYS : CTRL_KEYS
+    case 'alt':
+    case 'option':
+      return ['key-left-alt', 'key-right-alt']
+    case 'altgr':
+      return ['key-right-alt']
+    case 'shift':
+      return ['key-left-shift', 'key-right-shift']
+    default:
+      return undefined
+  }
 }
 
-/** Key ids an accelerator would occupy, best effort. */
-export function panicHotkeyKeyIds(accelerator: string): string[] {
+/** The platform this main process is running on. */
+export function currentPlatform(): Platform {
+  return process.platform === 'win32' ? 'win32' : 'darwin'
+}
+
+/** Key ids an accelerator would occupy on a given platform, best effort. */
+export function panicHotkeyKeyIds(
+  accelerator: string,
+  platform: Platform = currentPlatform(),
+): string[] {
   const ids = new Set<string>()
   for (const raw of accelerator.split('+')) {
-    const token = raw.trim()
+    const token = raw.trim().toLowerCase()
     if (token.length === 0) continue
-    const mapped = ACCELERATOR_TOKEN_TO_KEY_IDS[token.toLowerCase()]
+    const mapped = modifierTokenToKeyIds(token, platform)
     if (mapped !== undefined) {
       for (const id of mapped) ids.add(id)
       continue
     }
-    const candidate = `key-${token.toLowerCase()}`
+    const candidate = `key-${token}`
     if (getKeyById(candidate) !== undefined) ids.add(candidate)
   }
   return [...ids]
 }
 
 /**
- * Keys the user selected that are also part of the panic hotkey.
+ * The non-modifier key ids of an accelerator: the "K" of Ctrl+Alt+Shift+K.
+ * Usually one, and never a modifier.
+ */
+export function panicHotkeyTriggerKeyIds(accelerator: string): string[] {
+  const ids: string[] = []
+  for (const raw of accelerator.split('+')) {
+    const token = raw.trim().toLowerCase()
+    if (token.length === 0) continue
+    if (MODIFIER_TOKENS.has(token)) continue
+    const candidate = `key-${token}`
+    if (getKeyById(candidate) !== undefined && !ids.includes(candidate)) ids.push(candidate)
+  }
+  return ids
+}
+
+/**
+ * Keys the user selected that genuinely fight with the panic hotkey.
  *
- * Holding a key that the panic combination needs is incoherent: the app would
- * be pressing part of its own escape hatch, and depending on timing the hotkey
- * either never fires or fires the instant the session starts.
+ * Only the accelerator's trigger key counts. Holding it is incoherent: the app
+ * would be pressing part of its own escape hatch, and in tap or hold-repeat
+ * mode it could fire the hotkey itself. Holding a *modifier* the hotkey also
+ * uses is fine, and refusing it was a real cost: with the default hotkey
+ * (CommandOrControl+Alt+Shift+K) every one of the eight modifiers became
+ * unholdable, so Shift+W, the most ordinary hold in any game, was refused at
+ * Start under stock settings. A modifier we hold down only makes the panic
+ * combination easier for the user to complete, never harder, and the user's own
+ * physical press of that key still reaches the shortcut system regardless.
  */
 export function panicHotkeyConflicts(
   accelerator: string,
   selectedKeyIds: readonly string[],
 ): string[] {
-  const hotkeyIds = new Set(panicHotkeyKeyIds(accelerator))
-  return selectedKeyIds.filter((id) => hotkeyIds.has(id))
+  const triggerIds = new Set(panicHotkeyTriggerKeyIds(accelerator))
+  return selectedKeyIds.filter((id) => triggerIds.has(id))
+}
+
+/**
+ * The refusal the user reads when a selected key is the panic hotkey's trigger.
+ * It names the key on their own keyboard and the one action that fixes it,
+ * because the panic hotkey is not editable in Settings.
+ */
+export function describePanicHotkeyConflict(
+  accelerator: string,
+  conflicts: readonly string[],
+  platform: Platform = currentPlatform(),
+): string {
+  const names = conflicts.map((id) => {
+    const key = getKeyById(id)
+    return key === undefined ? id : platformLabel(key, platform)
+  })
+  const listed = names.length === 0 ? 'a key you picked' : names.join(' and ')
+  const combination = formatAcceleratorForPlatform(accelerator, platform)
+  const deselect = names.length > 1 ? 'those keys' : listed
+  return `The panic hotkey ${combination} needs ${listed}, which you also picked to hold. Deselect ${deselect} on the keyboard, then press Start again.`
+}
+
+/**
+ * An accelerator as a user reads it. Main-process copy of what the keyboard
+ * shows, in words rather than glyphs, because this text lands in a plain
+ * status line.
+ */
+export function formatAcceleratorForPlatform(accelerator: string, platform: Platform): string {
+  const mac = platform === 'darwin'
+  return accelerator
+    .split('+')
+    .map((raw) => {
+      const token = raw.trim()
+      switch (token.toLowerCase()) {
+        case 'commandorcontrol':
+        case 'cmdorctrl':
+          return mac ? 'Command' : 'Ctrl'
+        case 'command':
+        case 'cmd':
+          return 'Command'
+        case 'control':
+        case 'ctrl':
+          return mac ? 'Control' : 'Ctrl'
+        case 'alt':
+        case 'option':
+          return mac ? 'Option' : 'Alt'
+        case 'shift':
+          return 'Shift'
+        default:
+          return token
+      }
+    })
+    .filter((token) => token.length > 0)
+    .join('+')
 }
 
 function loadElectronGlobalShortcut(): GlobalShortcutLike {

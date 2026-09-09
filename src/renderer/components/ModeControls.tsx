@@ -1,4 +1,4 @@
-import { useId, type JSX } from 'react'
+import { useId, useState, type JSX } from 'react'
 import type { HoldMode } from '../../shared/types'
 import { LIMITS, useActions, useAppStore } from '../state/store'
 import styles from './ModeControls.module.css'
@@ -53,56 +53,63 @@ export function ModeControls(): JSX.Element {
         Mode
       </h2>
 
-      <fieldset className={styles.fieldset}>
-        <legend className={styles.visuallyHidden}>How the selection is sent</legend>
-        <div className={styles.segments}>
-          {MODES.map((option) => (
-            <label key={option.id} className={styles.segment}>
-              <input
-                className={styles.segmentInput}
-                type="radio"
-                name={groupName}
-                value={option.id}
-                checked={mode === option.id}
-                onChange={() => actions.setMode(option.id)}
-              />
-              <span className={styles.segmentLabel}>{option.label}</span>
-            </label>
-          ))}
-        </div>
-      </fieldset>
+      {/*
+        Control, explanation and parameters across one row rather than stacked
+        down the left edge. The blurb sits beside the segmented control it
+        describes, and the intervals sit under the control that owns them.
+      */}
+      <div className={styles.panel}>
+        <fieldset className={styles.fieldset}>
+          <legend className={styles.visuallyHidden}>How the selection is sent</legend>
+          <div className={styles.segments}>
+            {MODES.map((option) => (
+              <label key={option.id} className={styles.segment}>
+                <input
+                  className={styles.segmentInput}
+                  type="radio"
+                  name={groupName}
+                  value={option.id}
+                  checked={mode === option.id}
+                  onChange={() => actions.setMode(option.id)}
+                />
+                <span className={styles.segmentLabel}>{option.label}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
 
-      <p className={styles.blurb}>{active?.blurb}</p>
+        <p className={styles.blurb}>{active?.blurb}</p>
 
-      {mode === 'hold-repeat' ? (
-        <div className={styles.fields}>
-          <NumberField
-            label="First repeat after"
-            value={repeatInitialMs}
-            limits={LIMITS.repeatInitialMs}
-            onCommit={actions.setRepeatInitialMs}
-          />
-          <NumberField
-            label="Then every"
-            value={repeatIntervalMs}
-            limits={LIMITS.repeatIntervalMs}
-            onCommit={actions.setRepeatIntervalMs}
-            hint={`${perSecond(repeatIntervalMs)} a second`}
-          />
-        </div>
-      ) : null}
+        {mode === 'hold-repeat' ? (
+          <div className={styles.fields}>
+            <NumberField
+              label="First repeat after"
+              value={repeatInitialMs}
+              limits={LIMITS.repeatInitialMs}
+              onCommit={actions.setRepeatInitialMs}
+            />
+            <NumberField
+              label="Then every"
+              value={repeatIntervalMs}
+              limits={LIMITS.repeatIntervalMs}
+              onCommit={actions.setRepeatIntervalMs}
+              hint={`${perSecond(repeatIntervalMs)} a second`}
+            />
+          </div>
+        ) : null}
 
-      {mode === 'tap' ? (
-        <div className={styles.fields}>
-          <NumberField
-            label="Tap every"
-            value={tapIntervalMs}
-            limits={LIMITS.tapIntervalMs}
-            onCommit={actions.setTapIntervalMs}
-            hint={`${perSecond(tapIntervalMs)} a second`}
-          />
-        </div>
-      ) : null}
+        {mode === 'tap' ? (
+          <div className={styles.fields}>
+            <NumberField
+              label="Tap every"
+              value={tapIntervalMs}
+              limits={LIMITS.tapIntervalMs}
+              onCommit={actions.setTapIntervalMs}
+              hint={`${perSecond(tapIntervalMs)} a second`}
+            />
+          </div>
+        ) : null}
+      </div>
     </section>
   )
 }
@@ -121,9 +128,48 @@ interface NumberFieldProps {
   hint?: string
 }
 
+/**
+ * A number field that commits on blur and on Enter, never on a keystroke.
+ *
+ * The store clamps every interval to its limits the instant it is set, which
+ * is right for a finished value and wrong for a half-typed one: committing per
+ * keystroke turns "1500" into 100, then 1005, then 2000, and makes the field
+ * impossible to clear because Number('') is 0. So the typed text lives here as
+ * a draft, and only a finished value crosses into the store.
+ *
+ * The draft resyncs whenever the committed value changes underneath it, which
+ * is how a clamp, a preset or an undo shows up in the field.
+ */
 function NumberField({ label, value, limits, onCommit, hint }: NumberFieldProps): JSX.Element {
   const id = useId()
   const hintId = useId()
+  const [draft, setDraft] = useState(() => String(value))
+  const [lastValue, setLastValue] = useState(value)
+
+  // React's documented way to adjust state when a prop changes: resync during
+  // render rather than in an effect, so the field never paints one frame of a
+  // stale draft. This is what shows a clamp, a preset or an undo in the field.
+  if (value !== lastValue) {
+    setLastValue(value)
+    setDraft(String(value))
+  }
+
+  function commit(): void {
+    const trimmed = draft.trim()
+    // An empty or unparseable field is not an edit. Put the live value back
+    // rather than reading it as zero and clamping to the minimum.
+    if (trimmed === '' || !Number.isFinite(Number(trimmed))) {
+      setDraft(String(value))
+      return
+    }
+    const typed = Number(trimmed)
+    // Show what the store will hold. It clamps to these same limits, so a
+    // value that clamps back onto the one already there still leaves the
+    // field showing the truth rather than the rejected number.
+    setDraft(String(Math.min(limits.max, Math.max(limits.min, Math.round(typed)))))
+    onCommit(typed)
+  }
+
   return (
     <div className={styles.field}>
       <label className={styles.fieldLabel} htmlFor={id}>
@@ -140,10 +186,19 @@ function NumberField({ label, value, limits, onCommit, hint }: NumberFieldProps)
           min={limits.min}
           max={limits.max}
           step={limits.step}
-          value={value}
+          value={draft}
           aria-label={`${label}, in milliseconds`}
           aria-describedby={hint === undefined ? undefined : hintId}
-          onChange={(event) => onCommit(Number(event.target.value))}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              commit()
+            } else if (event.key === 'Escape') {
+              setDraft(String(value))
+            }
+          }}
         />
         <span className={styles.unit} aria-hidden="true">
           ms

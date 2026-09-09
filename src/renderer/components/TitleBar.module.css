@@ -79,9 +79,19 @@
   border-color: var(--text-dim);
 }
 
+/*
+ * Firing. The border, the filled dot, the glow ring and the one looping
+ * animation carry the state; the label stays --text.
+ *
+ * --sig is tuned to the 3:1 that WCAG 1.4.11 asks of a graphical object, not
+ * to the 4.5:1 that 1.4.3 asks of 11.5px text. As a label colour it measures
+ * 3.20:1 on --plate in the light theme, which would make the one word a user
+ * most needs to read at a glance the least legible text in the app. As --text
+ * it is 16.4:1 and nothing about the state is lost.
+ */
 .pill[data-phase='firing'] {
   border-color: var(--sig);
-  color: var(--sig);
+  color: var(--text);
 }
 
 .pill[data-phase='firing'] .dot {

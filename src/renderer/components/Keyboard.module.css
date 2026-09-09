@@ -7,10 +7,22 @@
  */
 
 .scroller {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
   max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
+  /* `safe` centring: the plate sits in the middle of the band while it fits,
+     and falls back to the start edge the moment it overflows, so the first
+     column of keys is never scrolled out of reach. The plain pair is written
+     first as the fallback for an engine that does not know `safe`; the safe
+     pair overrides it wherever it is understood. */
+  display: flex;
+  align-items: center;
+  align-items: safe center;
+  justify-content: center;
+  justify-content: safe center;
+  overflow: auto;
+  overscroll-behavior: contain;
   /* Room for the scrollbar plus the focus ring on the bottom row of keys. */
   padding: 3px 3px 4px;
   scrollbar-width: thin;
@@ -36,10 +48,10 @@
 
 .plate {
   position: relative;
+  flex: 0 0 auto;
   width: max-content;
-  /* Centres while it fits; collapses to 0 the moment the plate overflows, so
-     the left edge of the board is never scrolled out of reach. */
-  margin-inline: auto;
+  /* `--u` and `--gap` are both set inline by Keyboard.tsx, from the same
+     solved unit. See the note there for why --gap cannot live on :root. */
   padding: calc(var(--u) * var(--plate-pad));
   border: 1px solid var(--line);
   border-radius: var(--radius-3, 12px);

@@ -50,15 +50,26 @@
   border-color: var(--danger);
 }
 
-/* --- keyboard band -------------------------------------------------------- */
+/* --- keyboard band --------------------------------------------------------
+ *
+ * The band takes every pixel the other bands do not want, and `useKeyUnit`
+ * solves `--u` to fill it. That is the whole answer to a plate stranded at a
+ * fixed size in the middle of a window: the board is exactly as large as the
+ * space allows, on both axes, and never one pixel larger.
+ */
 
 .board {
-  padding: 16px 20px 4px;
+  flex: 1 1 auto;
+  min-height: 0;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 20px 10px;
 }
 
 .bandLabel {
-  margin: 0 0 8px;
+  flex: 0 0 auto;
+  margin: 0 0 6px;
   font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;
@@ -68,24 +79,46 @@
 }
 
 .boardArea {
+  flex: 1 1 auto;
+  min-height: 0;
   min-width: 0;
+  display: flex;
 }
 
-/* --- mouse and mode ------------------------------------------------------- */
+/* --- mouse and mode -------------------------------------------------------
+ *
+ * Capped to the plate's own width and centred under it, so the instrument
+ * reads as one object with one margin either side rather than as a centred
+ * board with two stubs of content stranded across a full-width band.
+ * `--plate-w` is set on the shell from the solved key unit.
+ *
+ * The columns stretch. Content inside them centres against the tallest one, so
+ * the divider runs the full height of the band and neither panel leaves a
+ * corner of dead space under it.
+ */
 
 .split {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: var(--plate-w, 100%);
+  margin-inline: auto;
   display: grid;
-  grid-template-columns: minmax(320px, auto) minmax(0, 1fr);
-  align-items: start;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: stretch;
   border-top: 1px solid var(--line);
-  margin-top: 12px;
 }
 
 .split > * + * {
   border-left: 1px solid var(--line);
 }
 
-@media (max-width: 1100px) {
+/*
+ * The app's own minimum window is 1100px, where the band is still about
+ * 1050px wide and the two columns sit side by side comfortably. Stacking at
+ * 1100 would fire at the minimum window itself and hand the extra height back
+ * out of the keyboard's budget; this only catches a browser dragged narrower.
+ */
+@media (max-width: 860px) {
   .split {
     grid-template-columns: minmax(0, 1fr);
   }

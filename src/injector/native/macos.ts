@@ -454,7 +454,11 @@ export interface MacRunningApp {
  * mode, deliberately not posted.
  */
 export interface InspectedEvent {
-  /** The tap it would have gone to. Always `kCGHIDEventTap` (0). */
+  /**
+   * The tap this event was handed to, read off the posting path rather than
+   * restated as a constant, so a dry run can catch a post that went anywhere
+   * other than `kCGHIDEventTap` (0).
+   */
   tap: number
   /** Target process for a `CGEventPostToPid` release, or null for a global post. */
   toPid: number | null
@@ -593,18 +597,34 @@ export class MacNativeInput implements NativeInput, NativeInputExtras {
     this.#postKey(code, true, { modifier: false, flags: this.#flags, repeat: true })
   }
 
-  /** Release. Not held is a no-op. */
+  /**
+   * Release a key. Safe for a key this adapter never pressed: the up is posted
+   * either way, and only the bookkeeping is conditional.
+   *
+   * The unconditional post is the whole point. The main process owns its own
+   * adapter that has pressed nothing, because the injector process did the
+   * pressing, and it is that adapter the crash-journal replay and the
+   * release-fallback reach for when the injector is gone. An adapter that
+   * refused to release a key it did not personally press would turn both of
+   * those last-resort paths into silent no-ops, which is precisely the stuck
+   * key this app exists to prevent. `WindowsNativeInput.keyUp` has always
+   * behaved this way; this is the same contract, stated in `NativeInput`.
+   */
   keyUp(key: KeyDef): void {
     const code = macKeyCode(key)
     const index = this.#held.findIndex((item) => item.kind === 'key' && item.code === code)
-    if (index === -1) return
-    const item = this.#held[index]
-    if (item === undefined || item.kind !== 'key') return
-    this.#held.splice(index, 1)
-    this.#heldKeyCodes.delete(code)
-    // A modifier must be out of the mask before its own release is posted.
-    this.#flags = this.#computeFlags()
-    this.#postKey(code, false, { modifier: item.modifierBits !== 0, flags: this.#flags })
+    const item = index === -1 ? undefined : this.#held[index]
+    if (item !== undefined && item.kind === 'key') {
+      this.#held.splice(index, 1)
+      this.#heldKeyCodes.delete(code)
+      // A modifier must be out of the mask before its own release is posted.
+      this.#flags = this.#computeFlags()
+    }
+    // For a key we were not holding, `#flags` already describes the modifiers
+    // that stay down, so it is stamped as it is: masking this key's bits out
+    // would wrongly clear a shared mask bit (releasing right shift while left
+    // shift is genuinely held would drop MASK_SHIFT).
+    this.#postKey(code, false, { modifier: MODIFIER_BITS.has(code), flags: this.#flags })
   }
 
   /**
@@ -613,6 +633,11 @@ export class MacNativeInput implements NativeInput, NativeInputExtras {
    * On focus loss every release is posted twice: here first, so the app that was
    * holding the key definitely sees it go up even though it is no longer
    * frontmost, then globally through `keyUp()` to clear system state.
+   *
+   * Unlike `keyUp`, this one stays scoped to what this adapter is holding, and
+   * deliberately so: it is only ever the first half of that pair, the
+   * unconditional global up follows it, and a targeted release for a key we
+   * never pressed would tell one app about an event it never saw.
    */
   keyUpToPid(key: KeyDef, pid: number): void {
     const code = macKeyCode(key)
@@ -651,12 +676,14 @@ export class MacNativeInput implements NativeInput, NativeInputExtras {
     this.#postMouse(btn, number, true)
   }
 
+  /** Release a button. Safe for a button this adapter never pressed: see `keyUp`. */
   mouseUp(btn: MouseDef): void {
     const number = macMouseButton(btn)
     const index = this.#held.findIndex((item) => item.kind === 'button' && item.number === number)
-    if (index === -1) return
-    this.#held.splice(index, 1)
-    this.#heldButtonNumbers.delete(number)
+    if (index !== -1) {
+      this.#held.splice(index, 1)
+      this.#heldButtonNumbers.delete(number)
+    }
     this.#postMouse(btn, number, false)
   }
 
@@ -950,14 +977,25 @@ export class MacNativeInput implements NativeInput, NativeInputExtras {
   }
 
   /**
-   * The single place an event leaves this file. With an inspector attached
-   * nothing is posted at all: the event is read back and handed over instead.
+   * The single place an event leaves this file, and the only place the tap is
+   * chosen. It is always `kCGHIDEventTap`: a session-tap post does not update
+   * the global key state games read through the HID layer.
    */
   #emit(b: Bindings, event: NativePointer, toPid: number | null): void {
+    this.#post(b, kCGHIDEventTap, event, toPid)
+  }
+
+  /**
+   * Hand one event to CoreGraphics. With an inspector attached nothing is
+   * posted at all: the event is read back and handed over instead, reported
+   * with the tap this call was actually given rather than the module constant,
+   * so a dry run can prove which tap the posting path would have used.
+   */
+  #post(b: Bindings, tap: number, event: NativePointer, toPid: number | null): void {
     const inspector = this.#inspector
     if (inspector !== undefined) {
       inspector({
-        tap: kCGHIDEventTap,
+        tap,
         toPid,
         type: b.CGEventGetType(event),
         keyCode: b.CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode),
@@ -969,7 +1007,7 @@ export class MacNativeInput implements NativeInput, NativeInputExtras {
       })
       return
     }
-    if (toPid === null) b.CGEventPost(kCGHIDEventTap, event)
+    if (toPid === null) b.CGEventPost(tap, event)
     else b.CGEventPostToPid(toPid, event)
   }
 }

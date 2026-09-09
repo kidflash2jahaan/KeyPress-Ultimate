@@ -21,11 +21,12 @@
 
 import koffi from 'koffi'
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import type { KeyDef, MouseDef } from '../../shared/types'
+import type { AppInfo, KeyDef, MouseDef } from '../../shared/types'
 import { getKeyById, getKeys, getMouseButtonById } from '../../shared/keys'
 import { hasNativeInputExtras, type NativeInput } from './types'
 import {
   __test,
+  classifyForegroundBlocking,
   createWindowsNativeInput,
   encodeKey,
   encodeMouseDown,
@@ -42,11 +43,14 @@ import {
   LAYOUT_REFUSAL,
   MOUSEEVENTF,
   MOUSEDATA,
+  narrowBlockingReport,
   probeStructLayout,
   assertStructLayout,
   timeBeginPeriod,
   timeEndPeriod,
   windowsNative,
+  type ElevationReport,
+  type ElevationState,
   type InputLayout,
 } from './windows'
 
@@ -497,6 +501,100 @@ describe('encodeKey', () => {
   })
 })
 
+/**
+ * Regression: Pause and Num Lock both live at Set-1 scan code 0x45, and the data used to
+ * carry them the way Windows REPORTS them (Chromium's dom_code_data.inc: Pause 0x0045,
+ * NumLock 0xE045) rather than the way SendInput ACCEPTS them. That made holding "Pause"
+ * inject a bare 0x45, which kbdus resolves to VK_NUMLOCK, so the app silently toggled the
+ * user's Num Lock instead (about ten times a second in tap mode), and made Num Lock
+ * inject 0xE0 0x45, which has no entry in the E0 scan-code table and does nothing at all.
+ *
+ * These assertions pin the injection values. `data/validate.mjs` pins the same pair in
+ * the data file, and `data/generate.mjs` refuses to write a file with them swapped.
+ */
+describe('the Pause / Num Lock scan-code 0x45 collision', () => {
+  const pause = getKeyById('key-pause')
+  const numLock = getKeyById('numpad-num-lock')
+
+  it('has both keys in the data', () => {
+    expect(pause).toBeDefined()
+    expect(numLock).toBeDefined()
+  })
+
+  it('sends Pause by virtual key, because bare scan code 0x45 is Num Lock', () => {
+    if (!pause) return
+    // Default mode: windowsUseVirtualKeys is false everywhere, so this is the path a
+    // user actually gets when they pick Pause and press Start.
+    const encoding = encodeKey(pause)
+    expect(encoding.mode).toBe('virtual-key')
+    expect(encoding.wVk).toBe(0x13) // VK_PAUSE
+    expect(encoding.downFlags & KEYEVENTF.SCANCODE).toBe(0)
+    expect(encoding.downFlags & KEYEVENTF.EXTENDEDKEY).toBe(0)
+    expect(encoding.wScan).toBe(0)
+    expect(encoding.upFlags & KEYEVENTF.KEYUP).toBe(KEYEVENTF.KEYUP)
+  })
+
+  it('keeps Pause on the virtual-key path with the global setting on as well', () => {
+    if (!pause) return
+    expect(encodeKey(pause, true)).toMatchObject({ mode: 'virtual-key', wVk: 0x13, wScan: 0 })
+  })
+
+  it('sends Num Lock as the BARE scan code 0x45, not 0xE0 0x45', () => {
+    if (!numLock) return
+    const encoding = encodeKey(numLock)
+    expect(encoding.mode).toBe('scancode')
+    expect(encoding.wScan).toBe(0x45)
+    expect(encoding.extended).toBe(false)
+    expect(encoding.downFlags & KEYEVENTF.SCANCODE).toBe(KEYEVENTF.SCANCODE)
+    // The E0 table has entries for 0x1C, 0x1D, 0x35, 0x37, 0x38, 0x46-0x53, 0x5B-0x5D and
+    // the media keys, and nothing at 0x45. Extended here would resolve to no virtual key.
+    expect(encoding.downFlags & KEYEVENTF.EXTENDEDKEY).toBe(0)
+  })
+
+  it('lets no key but Num Lock inject the bare scan code 0x45', () => {
+    // The exact shape of the original bug: Pause injecting bare 0x45 and toggling the
+    // user's Num Lock. Any key that reaches this list is doing the same thing.
+    const bare45: string[] = []
+    for (const key of getKeys()) {
+      if (key.winScanCode === null && key.winVirtualKey === null) continue
+      const encoding = encodeKey(key)
+      if (encoding.mode === 'scancode' && encoding.wScan === 0x45 && !encoding.extended) {
+        bare45.push(key.id)
+      }
+    }
+    expect(bare45).toEqual(['numpad-num-lock'])
+  })
+
+  it('lets no key inject 0xE0 0x45, which resolves to no virtual key at all', () => {
+    const ext45: string[] = []
+    for (const key of getKeys()) {
+      if (key.winScanCode === null && key.winVirtualKey === null) continue
+      const encoding = encodeKey(key)
+      if (encoding.mode === 'scancode' && encoding.wScan === 0x45 && encoding.extended) {
+        ext45.push(key.id)
+      }
+    }
+    expect(ext45).toEqual([])
+  })
+
+  it('gives every scancode-injected key a unique (wScan, extended) identity', () => {
+    // With KEYEVENTF_SCANCODE the wVk field is ignored, so this pair IS the key as far
+    // as the target app is concerned. Two keys sharing it means one injects as the other.
+    const seen = new Map<string, string>()
+    const collisions: string[] = []
+    for (const key of getKeys()) {
+      if (key.winScanCode === null && key.winVirtualKey === null) continue
+      const encoding = encodeKey(key)
+      if (encoding.mode !== 'scancode') continue
+      const identity = `0x${encoding.wScan.toString(16)}|${encoding.extended ? 'E0' : 'bare'}`
+      const previous = seen.get(identity)
+      if (previous) collisions.push(`${previous} vs ${key.id} (${identity})`)
+      else seen.set(identity, key.id)
+    }
+    expect(collisions).toEqual([])
+  })
+})
+
 describe('mouse encoding', () => {
   it('produces down and up flags for a holdable button', () => {
     expect(encodeMouseDown(MOUSE_LEFT)).toEqual({ dwFlags: MOUSEEVENTF.LEFTDOWN, mouseData: 0 })
@@ -889,5 +987,190 @@ describe('identity and naming', () => {
     expect(__test.prettyName('Rust.exe', 'Rust - Facepunch')).toBe('Rust')
     expect(__test.prettyName(null, 'Some Window')).toBe('Some Window')
     expect(__test.prettyName(null, '')).toBe('Unknown')
+  })
+})
+
+/**
+ * The UIPI / elevation decision.
+ *
+ * This is the one mitigation for the documented "SendInput reports success while UIPI
+ * throws the input away" failure: `SendInput` returns the full inserted count and leaves
+ * GetLastError at zero, so nothing downstream can tell that the keys went nowhere, and
+ * without this check the app confidently shows "Firing" into a void.
+ *
+ * The gathering half needs a live user32 and can only run on Windows. The DECISION half
+ * is a pure function of three facts, which is the part that can be wrong, so it is
+ * separated out and every branch is proved here, on macOS.
+ */
+describe('foreground blocking classification', () => {
+  const APP: AppInfo = { identity: 'c:\\games\\rust\\rust.exe', name: 'Rust', pid: 4242, path: 'C:\\Games\\Rust\\Rust.exe' }
+
+  const elevation = (state: ElevationState): ElevationReport => ({
+    state,
+    lastError: state === 'probably-elevated' ? 5 : null,
+    reason: `test: ${state}`,
+  })
+
+  const ALL_STATES: ElevationState[] = [
+    'known-elevated',
+    'known-not-elevated',
+    'probably-elevated',
+    'unknown',
+  ]
+
+  it('has nothing to say, and nothing to abort for, with no foreground window', () => {
+    const report = classifyForegroundBlocking(null, elevation('unknown'), elevation('unknown'))
+    expect(report.severity).toBe('info')
+    expect(report.ok).toBe(false)
+    expect(report.app).toBeNull()
+    // Not an abort: focus is legitimately nowhere for a moment as a game takes over.
+    expect(narrowBlockingReport(report).code).toBeNull()
+  })
+
+  it('is the one certainty: an elevated target while we are not elevated', () => {
+    const report = classifyForegroundBlocking(
+      APP,
+      elevation('known-not-elevated'),
+      elevation('known-elevated'),
+    )
+    expect(report.severity).toBe('blocked')
+    expect(report.ok).toBe(false)
+    expect(report.message).toContain('Rust')
+    expect(report.message).toContain('administrator')
+    const narrowed = narrowBlockingReport(report)
+    expect(narrowed.code).toBe('injection-blocked')
+    expect(narrowed.appName).toBe('Rust')
+    expect(narrowed.appPid).toBe(4242)
+    expect(narrowed.unavailable).toBe(false)
+  })
+
+  it('clears an elevated target once we are elevated too', () => {
+    const report = classifyForegroundBlocking(
+      APP,
+      elevation('known-elevated'),
+      elevation('known-elevated'),
+    )
+    expect(report.severity).toBe('ok')
+    expect(report.ok).toBe(true)
+    expect(narrowBlockingReport(report).code).toBeNull()
+  })
+
+  it('does not claim an all-clear for a target it cannot open even from high integrity', () => {
+    // System, a protected process, or anti-cheat. Being elevated is not enough there,
+    // so the blanket "running as administrator, so it can inject" line would be a lie.
+    const report = classifyForegroundBlocking(
+      APP,
+      elevation('known-elevated'),
+      elevation('probably-elevated'),
+    )
+    expect(report.severity).toBe('warn')
+    expect(report.ok).toBe(false)
+    expect(report.message).toContain('anti-cheat')
+    // Still not an abort.
+    expect(narrowBlockingReport(report).code).toBeNull()
+  })
+
+  it('warns but never aborts when it could not inspect the target', () => {
+    const report = classifyForegroundBlocking(
+      APP,
+      elevation('known-not-elevated'),
+      elevation('probably-elevated'),
+    )
+    expect(report.severity).toBe('warn')
+    expect(report.ok).toBe(false)
+    // A denied OpenProcess is also what anti-cheat looks like. Refusing to fire here
+    // would break the app for exactly the games it exists to serve.
+    expect(narrowBlockingReport(report).code).toBeNull()
+  })
+
+  it('says a plain target is reachable', () => {
+    const report = classifyForegroundBlocking(
+      APP,
+      elevation('known-not-elevated'),
+      elevation('known-not-elevated'),
+    )
+    expect(report).toMatchObject({ severity: 'ok', ok: true })
+    expect(report.message).toContain('Rust')
+  })
+
+  it('never blocks on ignorance: two unknowns fire', () => {
+    const report = classifyForegroundBlocking(APP, elevation('unknown'), elevation('unknown'))
+    expect(report.ok).toBe(true)
+    expect(narrowBlockingReport(report).code).toBeNull()
+  })
+
+  it('produces exactly one abort case across the whole 4x4 state matrix', () => {
+    const aborts: string[] = []
+    for (const self of ALL_STATES) {
+      for (const target of ALL_STATES) {
+        const report = classifyForegroundBlocking(APP, elevation(self), elevation(target))
+        const narrowed = narrowBlockingReport(report)
+        // Invariants that must hold for every cell.
+        expect(narrowed.message.length).toBeGreaterThan(0)
+        expect(narrowed.message).not.toContain('undefined')
+        expect(narrowed.code === 'injection-blocked').toBe(report.severity === 'blocked')
+        expect(report.ok).toBe(report.severity === 'ok')
+        if (narrowed.code) aborts.push(`${self} -> ${target}`)
+      }
+    }
+    expect(aborts).toEqual([
+      'known-not-elevated -> known-elevated',
+      'probably-elevated -> known-elevated',
+      'unknown -> known-elevated',
+    ])
+  })
+
+  it('is reachable through __test as well, so the pure half stays covered', () => {
+    expect(typeof __test.classifyForegroundBlocking).toBe('function')
+    expect(typeof __test.narrowBlockingReport).toBe('function')
+  })
+})
+
+describe('describeInjectionBlocking, the call the hold loop makes', () => {
+  it('is callable on an uninitialised adapter and never throws', () => {
+    // This runs on the press path. An exception there would be a worse outcome than the
+    // silence the check exists to prevent, so it degrades instead of throwing. Contrast
+    // describeForegroundBlocking(), which is a diagnostics call and does throw.
+    const fresh = createWindowsNativeInput()
+    expect(() => fresh.describeForegroundBlocking()).toThrow()
+
+    const report = fresh.describeInjectionBlocking()
+    expect(report.unavailable).toBe(true)
+    expect(report.code).toBeNull() // never abort because we could not look
+    expect(report.ok).toBe(true)
+    expect(report.message.length).toBeGreaterThan(0)
+    expect(report.appName).toBeNull()
+    expect(report.appPid).toBeNull()
+  })
+
+  it('parks its answer where a bug report can find it', () => {
+    const fresh = createWindowsNativeInput()
+    expect(fresh.getLastBlockingCheck()).toBeNull()
+    expect(fresh.getDiagnostics().lastBlockingCheck).toBeNull()
+
+    const report = fresh.describeInjectionBlocking()
+    expect(fresh.getLastBlockingCheck()).toEqual(report)
+    expect(fresh.getDiagnostics().lastBlockingCheck).toEqual(report)
+  })
+
+  it('is shaped so a caller only ever has to branch on `code`', () => {
+    // The contract handed to the injector: abort iff code is non-null. Nothing else in
+    // the shape requires knowing what a Windows integrity level is.
+    const fresh = createWindowsNativeInput()
+    const report = fresh.describeInjectionBlocking()
+    expect(Object.keys(report).sort()).toEqual([
+      'appName',
+      'appPid',
+      'code',
+      'message',
+      'ok',
+      'severity',
+      'unavailable',
+    ])
+  })
+
+  it('exposes a way to drop the per-pid cache for an explicit re-check', () => {
+    const fresh = createWindowsNativeInput()
+    expect(() => fresh.clearBlockingCache()).not.toThrow()
   })
 })

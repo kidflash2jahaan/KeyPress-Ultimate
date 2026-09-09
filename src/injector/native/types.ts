@@ -18,8 +18,26 @@ export interface NativeInput {
   listApplications(): AppInfo[]
   getFrontmostPid(): number | null // null = unknown; caller MUST treat as "not on target"
   keyDown(key: KeyDef): void
+  /**
+   * Release a key. **Always posts the up**, including for a key this adapter
+   * never pressed: only the held-state bookkeeping is conditional. It throws
+   * only when the OS refused the post.
+   *
+   * This is a contract, not an implementation detail, because the main process
+   * owns an adapter instance that has pressed nothing (the injector process
+   * did the pressing) and calls `keyUp` on it from its two last-resort release
+   * paths: the crash-journal replay at startup, and the fallback used when the
+   * injector dies without confirming. An adapter that treated "not in my own
+   * held list" as "nothing to do" would make both of those post nothing while
+   * reporting success, and the caller would then clear the journal that was the
+   * only remaining record that the key is down.
+   *
+   * An up for a key that is already up is harmless on both platforms, so the
+   * redundant post is always the cheaper mistake.
+   */
   keyUp(key: KeyDef): void
   mouseDown(btn: MouseDef): void
+  /** Release a button. Always posts the up, on the same contract as `keyUp`. */
   mouseUp(btn: MouseDef): void
   releaseAll(): void // idempotent, batched where the OS allows
   hasPermission(): boolean
@@ -51,7 +69,16 @@ export interface NativeInputExtras {
    * The focus-loss path posts every release twice: first here, at the app that
    * was holding the key, so it definitely observes the release even though it
    * is no longer frontmost, then again globally through `keyUp()` to clear
-   * system state. A no-op for a key this adapter is not holding.
+   * system state.
+   *
+   * A no-op for a key this adapter is not holding, and that is deliberate: it
+   * is the one release in the app that is scoped to held state, because it is
+   * only ever the first half of a pair. The unconditional global `keyUp()`
+   * follows immediately and is what guarantees the key comes up, so nothing is
+   * stranded by skipping the targeted post, while posting one at a pid we were
+   * never holding a key for would only tell that app about a release it never
+   * saw pressed. The last-resort release paths in main call `keyUp()`, never
+   * this.
    */
   keyUpToPid(key: KeyDef, pid: number): void
 

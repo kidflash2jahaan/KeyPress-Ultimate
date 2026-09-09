@@ -27,8 +27,9 @@ import type {
   Settings,
   UpdateInfo,
 } from '../../shared/types'
-import { getKeyById, getMouseButtonById } from '../../shared/keys'
+import { getKeyById, getMouseButtonById, platformLabel } from '../../shared/keys'
 import type {
+  DownloadResult,
   KpuBridge,
   PermissionState,
   UpdateProgress,
@@ -77,6 +78,12 @@ export interface Notice {
 }
 
 export type UpdateStage = 'none' | 'available' | 'downloading' | 'ready'
+
+/** Both of these end on the same offer, because it is the one that still works. */
+export const DOWNLOAD_FAILED =
+  'The download stopped before it finished. Open the release page to get it by hand.'
+export const DOWNLOAD_ABANDONED =
+  'This build cannot replace itself, so the download did not start. Open the release page to install the new version by hand.'
 
 // ---------------------------------------------------------------------------
 // State
@@ -234,9 +241,15 @@ function isHoldable(id: string, kind: 'key' | 'button'): boolean {
   return def?.holdable ?? true
 }
 
-function labelOf(id: string, kind: 'key' | 'button'): string {
-  if (kind === 'key') return getKeyById(id)?.label ?? id
-  return getMouseButtonById(id)?.label ?? id
+/**
+ * The name to use in a notice, in the legend this platform prints. A notice
+ * that says "Num Lock" about a cap the board prints as "Clear" is a notice
+ * about a key the user cannot find.
+ */
+function labelOf(id: string, kind: 'key' | 'button', platform: Platform): string {
+  if (kind !== 'key') return getMouseButtonById(id)?.label ?? id
+  const def = getKeyById(id)
+  return def === undefined ? id : platformLabel(def, platform)
 }
 
 function newPresetId(): string {
@@ -260,6 +273,15 @@ export function createAppStore(bridge: KpuBridge): AppStore {
     /** Any edit to the config detaches from the preset it came from. */
     function editConfig(patch: Partial<AppState>): void {
       set({ ...patch, activePresetId: null })
+    }
+
+    /** Back out of the downloading stage and say what to do instead. */
+    function abandonDownload(text: string): void {
+      set({
+        updateStage: get().update === null ? 'none' : 'available',
+        updateProgress: null,
+        notice: { kind: 'problem', text },
+      })
     }
 
     const actions: AppActions = {
@@ -318,7 +340,7 @@ export function createAppStore(bridge: KpuBridge): AppStore {
           set({
             notice: {
               kind: 'problem',
-              text: `${labelOf(id, 'key')} has no held state, so Hold cannot use it. Switch to Tap and it will be pressed once per interval.`,
+              text: `${labelOf(id, 'key', state.platform)} has no held state, so Hold cannot use it. Switch to Tap and it will be pressed once per interval.`,
             },
           })
           return
@@ -364,7 +386,7 @@ export function createAppStore(bridge: KpuBridge): AppStore {
           set({
             notice: {
               kind: 'problem',
-              text: `${labelOf(id, 'button')} is a wheel detent, not a button, so there is nothing to hold. Switch to Tap to scroll repeatedly.`,
+              text: `${labelOf(id, 'button', state.platform)} is a wheel detent, not a button, so there is nothing to hold. Switch to Tap to scroll repeatedly.`,
             },
           })
           return
@@ -392,8 +414,8 @@ export function createAppStore(bridge: KpuBridge): AppStore {
         const droppedKeys = state.keyIds.filter((id) => !isHoldable(id, 'key'))
         const droppedButtons = state.buttonIds.filter((id) => !isHoldable(id, 'button'))
         const dropped = [
-          ...droppedKeys.map((id) => labelOf(id, 'key')),
-          ...droppedButtons.map((id) => labelOf(id, 'button')),
+          ...droppedKeys.map((id) => labelOf(id, 'key', state.platform)),
+          ...droppedButtons.map((id) => labelOf(id, 'button', state.platform)),
         ]
         editConfig({
           mode,
@@ -518,7 +540,26 @@ export function createAppStore(bridge: KpuBridge): AppStore {
 
       async downloadUpdate() {
         set({ updateStage: 'downloading', updateProgress: null })
-        await bridge.updates.download()
+
+        let outcome: DownloadResult | void
+        try {
+          outcome = await bridge.updates.download()
+        } catch {
+          abandonDownload(DOWNLOAD_FAILED)
+          return
+        }
+
+        if (outcome !== undefined && !outcome.ok) {
+          abandonDownload(outcome.message ?? DOWNLOAD_FAILED)
+          return
+        }
+
+        // The call came back without the download ever reaching 100%, so main
+        // gave up on it: an unsigned or translocated build that cannot replace
+        // itself, a dropped connection, a checksum that did not match. Nothing
+        // else will arrive, so leave the downloading stage rather than sitting
+        // on a disabled button and a 0% bar for the rest of the session.
+        if (get().updateStage === 'downloading') abandonDownload(DOWNLOAD_ABANDONED)
       },
 
       async installUpdate() {

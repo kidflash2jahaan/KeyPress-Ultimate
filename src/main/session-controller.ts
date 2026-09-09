@@ -40,7 +40,12 @@ import {
 } from '@shared/ipc'
 import type { AppInfo, SessionConfig, SessionPhase, SessionState, Settings } from '@shared/types'
 import type { HoldJournal } from './journal'
-import { PanicHotkey, panicHotkeyConflicts, type GlobalShortcutLike } from './panic-hotkey'
+import {
+  PanicHotkey,
+  describePanicHotkeyConflict,
+  panicHotkeyConflicts,
+  type GlobalShortcutLike,
+} from './panic-hotkey'
 
 // ---------------------------------------------------------------------------
 // Injected seams
@@ -187,6 +192,14 @@ const DEFAULT_FOCUS_RELEASE_GRACE_MS = 500
 const PERMISSION_POLL_MS = 1000
 /** Even "30 minutes" gets a floor, so a fat-fingered 0.001 cannot arm forever. */
 const MIN_SESSION_MS = 10_000
+/**
+ * Node stores a timer delay in a signed 32-bit int. Anything larger overflows,
+ * is silently clamped to 1ms, and fires immediately, which for the max-session
+ * timer means the session ends the instant it starts. The store clamps
+ * `maxSessionMinutes` too; this is the last line of defence, because the value
+ * also arrives from settings files this build did not write.
+ */
+const MAX_TIMER_MS = 2_147_483_647
 
 const POWER_EVENTS: ReadonlyArray<{ event: PowerEventName; reason: DisarmReason }> = [
   { event: 'suspend', reason: 'power-suspend' },
@@ -212,6 +225,12 @@ type TimerName =
   | 'max-session'
   | 'release-grace'
   | 'soft-release-watchdog'
+
+/**
+ * The injector's "Windows will not let me reach this window" report. The shape
+ * lives in the IPC contract; this is only a name for it.
+ */
+type ElevatedTargetBlocked = Extract<InjectorToMainMessage, { t: 'blocked' }>
 
 interface PendingRelease {
   reason: DisarmReason
@@ -298,9 +317,19 @@ export class SessionController {
   }
 
   setSettings(settings: Settings): void {
+    const previous = this.#settings
     this.#settings = settings
-    if (this.#armed && this.#injector !== null) {
-      this.#post({ t: 'settings', settings })
+    if (!this.#armed || this.#injector === null) return
+
+    this.#post({ t: 'settings', settings })
+
+    // The injector re-reads the cap the moment it is told, so main has to as
+    // well. Leaving the old timeout running means the two sides disagree about
+    // when the session ends: raising the cap mid-session would still hard-stop
+    // at the original deadline, and lowering it would leave main's own failsafe
+    // running long after the injector had self-disarmed.
+    if (settings.maxSessionMinutes !== previous.maxSessionMinutes) {
+      this.#startMaxSessionTimer()
     }
   }
 
@@ -345,9 +374,11 @@ export class SessionController {
     const accelerator = this.#settings.panicHotkey
     const conflicts = panicHotkeyConflicts(accelerator, config.keyIds)
     if (conflicts.length > 0) {
+      // Names the key on the user's own keyboard and the one action that fixes
+      // it. The old wording pointed at Settings, which has no hotkey editor.
       return this.#refuse(
         'panic-hotkey-conflict',
-        `The panic hotkey ${accelerator} uses a key you asked to hold. Change one of them, then press Start again.`,
+        describePanicHotkeyConflict(accelerator, conflicts),
         'idle',
       )
     }
@@ -540,7 +571,6 @@ export class SessionController {
 
     const held = this.#currentlyHeld()
     const holdingNow = held.keyIds.length > 0 || held.buttonIds.length > 0
-    const everFired = this.#lastHeld.keyIds.length > 0 || this.#lastHeld.buttonIds.length > 0
     const keyIds = holdingNow ? held.keyIds : [...this.#lastHeld.keyIds]
     const buttonIds = holdingNow ? held.buttonIds : [...this.#lastHeld.buttonIds]
     const terminalPhase = options.terminalPhase ?? terminalPhaseFor(reason)
@@ -553,20 +583,20 @@ export class SessionController {
     this.#pendingSoftReason = null
     this.#panic.unregister()
 
-    // Only skip the wait when this session never pressed anything at all. A
-    // session that has fired once has to hear the injector confirm, because a
-    // state message can always be in flight.
-    const nothingEverHeld = !holdingNow && !everFired
     this.#pending = { reason, terminalPhase, message, keyIds, buttonIds }
 
     // Ask the injector to release before doing anything that could kill it.
     this.#post({ t: 'disarm', reason })
     if (this.#pending === null) return // the injector confirmed synchronously
 
-    if (nothingEverHeld) {
-      this.#finishTeardown(true)
-      return
-    }
+    // There is deliberately no fast path here for "this session never pressed
+    // anything". Everything main knows about the injector's key state lags the
+    // injector by one IPC hop: the injector presses and *then* emits its state,
+    // so a session that reads as idle can already be holding a key. Skipping
+    // the wait and killing the injector in the same tick as the disarm was the
+    // one way this app could leave a key down system-wide and delete the
+    // journal that would have recovered it. Proof now comes from exactly two
+    // places: the injector confirming, or the main-side fallback releasing.
     if (options.sync === true) {
       // No chance to wait. The injector's own exit handler and its 300ms
       // heartbeat timeout are the backstops, and an unconfirmed release leaves
@@ -608,7 +638,9 @@ export class SessionController {
         confirmed: true,
         hardStop: false,
       })
-      this.#lastHeld = { keyIds: [], buttonIds: [] }
+      // `#lastHeld` deliberately survives a soft release. The session is still
+      // armed, so that set is still the set a later unconfirmable teardown has
+      // to replay ups for. It is reset by `arm` and by a finished teardown.
       return
     }
 
@@ -645,8 +677,14 @@ export class SessionController {
     if (!released) {
       const fallback = this.#options.releaseFallback
       if (fallback !== undefined && fallback !== null) {
+        // Release everything this session could conceivably have down, not just
+        // what the last state message said. The injector's key-down happens one
+        // IPC hop before main hears about it, so the configured set is the only
+        // honest upper bound, and posting an up for a key that was never down
+        // is harmless: it is exactly what the journal replays at next launch.
+        const safety = this.#unconfirmedReleaseSet(pending)
         try {
-          fallback(pending.keyIds, pending.buttonIds)
+          fallback(safety.keyIds, safety.buttonIds)
           released = true
         } catch (error) {
           this.#options.onError?.('main-side release fallback failed', error)
@@ -695,6 +733,18 @@ export class SessionController {
     this.#lastHeld = { keyIds: [], buttonIds: [] }
   }
 
+  /**
+   * What to hand the main-side fallback when nothing confirmed the ups: the set
+   * main believes was held, plus everything the session was configured to hold.
+   */
+  #unconfirmedReleaseSet(pending: PendingRelease): { keyIds: string[]; buttonIds: string[] } {
+    const config = this.#config
+    return {
+      keyIds: union(pending.keyIds, config?.keyIds ?? []),
+      buttonIds: union(pending.buttonIds, config?.buttonIds ?? []),
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Injector conversation
   // -------------------------------------------------------------------------
@@ -709,6 +759,11 @@ export class SessionController {
         return
       case 'error':
         this.#handleInjectorError(message.code, message.message)
+        return
+      case 'blocked':
+        // Windows UIPI. The injector's report about the outside world, not a
+        // value main produced, so the payload is coerced rather than trusted.
+        this.#handleElevatedTarget(message)
         return
       case 'state':
         this.#handleInjectorState(message)
@@ -769,6 +824,19 @@ export class SessionController {
     if (!firing) this.#message = this.#waitingMessage(this.#config)
     else this.#message = null
     this.#emitState()
+  }
+
+  /**
+   * The target is running elevated and Windows will not let our input reach it.
+   * Nothing the app can do at runtime fixes that, so the session ends in
+   * `blocked` carrying a message that names the app, exactly like a missing
+   * Accessibility permission on macOS.
+   */
+  #handleElevatedTarget(message: ElevatedTargetBlocked): void {
+    this.#release('injector-error', {
+      terminalPhase: 'blocked',
+      message: elevatedTargetMessage(message.appName, message.message),
+    })
   }
 
   #handleInjectorError(code: InjectorErrorCode, detail: string): void {
@@ -856,11 +924,22 @@ export class SessionController {
     })
   }
 
+  /**
+   * Schedules the cap against the session's own start, so it can be restarted
+   * mid-session after a settings change and still mean "N minutes of holding",
+   * not "N more minutes". Safe to call repeatedly: it replaces the timer.
+   */
   #startMaxSessionTimer(): void {
+    this.#clearTimer('max-session')
     const minutes = this.#settings.maxSessionMinutes
     if (!Number.isFinite(minutes) || minutes <= 0) return // 0 is unlimited, by design.
-    const ms = Math.max(MIN_SESSION_MS, minutes * 60_000)
-    this.#setTimeout('max-session', ms, () => {
+    const total = Math.min(MAX_TIMER_MS, Math.max(MIN_SESSION_MS, minutes * 60_000))
+    const now = this.#clock.now()
+    const elapsed = this.#startedAt === null ? 0 : Math.max(0, now - this.#startedAt)
+    // A cap that is already past fires on the next turn of the loop rather than
+    // synchronously: `setSettings` runs inside an IPC handler, and releasing
+    // re-entrantly from there is how a teardown ends up half-done.
+    this.#setTimeout('max-session', Math.max(0, total - elapsed), () => {
       this.#release('max-session-time')
     })
   }
@@ -1060,6 +1139,28 @@ export function injectorErrorMessage(code: InjectorErrorCode, detail: string): s
     case 'unknown':
       return detail.length > 0 ? detail : 'The input process reported an error, so everything was released.'
   }
+}
+
+/**
+ * What the user reads when Windows refuses the injection because the target is
+ * elevated. It names the app, because "restart as administrator" is only
+ * actionable once you know which window is the problem.
+ */
+export function elevatedTargetMessage(appName: unknown, detail: unknown): string {
+  const name = typeof appName === 'string' ? appName.trim() : ''
+  if (name.length > 0) {
+    return `Windows is blocking input into ${name} because it is running as administrator. Restart KeyPress Ultimate as administrator, then press Start again.`
+  }
+  const fallback = typeof detail === 'string' ? detail.trim() : ''
+  if (fallback.length > 0) return fallback
+  return 'Windows is blocking input into the target app because it is running as administrator. Restart KeyPress Ultimate as administrator, then press Start again.'
+}
+
+/** Order-preserving union, used to widen an unconfirmed release set. */
+function union(a: readonly string[], b: readonly string[]): string[] {
+  const out = [...a]
+  for (const id of b) if (!out.includes(id)) out.push(id)
+  return out
 }
 
 function appendUnconfirmedWarning(message: string): string {

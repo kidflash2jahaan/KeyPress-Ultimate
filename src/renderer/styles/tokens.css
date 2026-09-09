@@ -87,16 +87,25 @@
   /* -- Geometry ------------------------------------------------------------
      --u is THE key unit, in CSS pixels. Everything on the board is a
      multiple of it (see data/layout-notes.md). A full-size 104 board is
-     22.5u wide, so --u is solved from the viewport rather than stepped at a
-     breakpoint: it lands on exactly 48px at the 1180px default window,
-     tapers continuously as the window narrows, and floors at 30px, below
-     which the keyboard band scrolls horizontally instead of shrinking.  */
-  --keyboard-units: 22.5;
-  --keyboard-inset: 96px; /* total horizontal padding of the keyboard band, both sides */
-  --u: clamp(30px, calc((100vw - var(--keyboard-inset)) / var(--keyboard-units)), 48px);
+     22.5u wide and 6.5u tall.
+
+     The board's real --u is set inline on .plate by Keyboard.tsx, solved by
+     unitForSpace() from the band's MEASURED width and height. It is measured
+     rather than derived from 100vw because the band is not the window: it
+     sits inside a border, a padding and whatever the other bands leave.
+
+     The two values below are the fallback for anything drawn outside the
+     plate and for the first paint. Do not reintroduce a viewport clamp here.
+     One existed, solving against a 96px inset the band never had, and it
+     silently fought the measured value.                                    */
+  --u: 48px;
 
   /* Gutter between keycaps. Subtracted INSIDE each unit box, never added as
-     an outer margin, so 1u and 2 x 0.5u occupy identical pitch. */
+     an outer margin, so 1u and 2 x 0.5u occupy identical pitch.
+
+     .plate redeclares this against its own --u. It has to: a custom property
+     is substituted on the element that declares it, so this copy is frozen to
+     the --u directly above and can never track the plate's. */
   --gap: calc(var(--u) * 0.09);
 
   /* Tight radii. This is machined hardware, not a rounded-card SaaS kit. */

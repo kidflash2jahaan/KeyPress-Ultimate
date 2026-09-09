@@ -169,7 +169,15 @@ export interface Updater {
    * launch; a user-initiated check rejects so the UI can say what went wrong.
    */
   check(opts?: { userInitiated?: boolean }): Promise<UpdateInfo | null>
-  /** Streams the asset to a staging dir and verifies its SHA-256. */
+  /**
+   * Streams the asset to a staging dir and verifies its SHA-256.
+   *
+   * The completed (100%) progress event is emitted on exactly one path: after
+   * the hash of the bytes on disk matched the published SHA-256. Everything
+   * emitted while the body is still arriving stops short of complete, so a
+   * caller may treat "progress reached the total" as proof of verification.
+   * Every failure rejects; nothing partial is ever left behind.
+   */
   download(info: UpdateInfo, onProgress: (p: DownloadProgress) => void): Promise<string>
   /** Hands the swap to a detached process, then quits. */
   install(info: UpdateInfo, downloadedPath: string): Promise<void>
@@ -866,6 +874,24 @@ export function createUpdater(overrides: Partial<UpdaterDeps> = {}): Updater {
     let bytesDone = 0
     let lastEmit = Number.NEGATIVE_INFINITY
 
+    /**
+     * Progress emitted while bytes are still arriving must never *look*
+     * finished. The renderer turns a completed fraction into "Downloaded and
+     * verified.", and at this point nothing has been verified: the SHA-256 is
+     * not compared until the whole body has been read. So an in-flight event is
+     * deliberately held one byte, and one percent, short of the total. The only
+     * completed event this function emits is the one after the comparison
+     * passes, which is the first moment the claim on screen is true.
+     */
+    function reportStreaming(): void {
+      const done = total > 0 ? Math.min(bytesDone, Math.max(total - 1, 0)) : bytesDone
+      onProgress({
+        bytesDone: done,
+        bytesTotal: total,
+        percent: total > 0 ? Math.min(99, Math.floor((done / total) * 100)) : 0,
+      })
+    }
+
     try {
       try {
         for await (const chunk of response.body) {
@@ -876,11 +902,7 @@ export function createUpdater(overrides: Partial<UpdaterDeps> = {}): Updater {
           const now = deps.now()
           if (now - lastEmit >= PROGRESS_THROTTLE_MS) {
             lastEmit = now
-            onProgress({
-              bytesDone,
-              bytesTotal: total,
-              percent: total > 0 ? Math.min(100, Math.floor((bytesDone / total) * 100)) : 0,
-            })
+            reportStreaming()
           }
         }
       } finally {
@@ -893,8 +915,6 @@ export function createUpdater(overrides: Partial<UpdaterDeps> = {}): Updater {
       throw error
     }
 
-    onProgress({ bytesDone, bytesTotal: Math.max(total, bytesDone), percent: 100 })
-
     const actual = hash.digest('hex')
     if (actual !== info.sha256.toLowerCase()) {
       // Never keep, and never install, bytes we cannot vouch for.
@@ -905,6 +925,9 @@ export function createUpdater(overrides: Partial<UpdaterDeps> = {}): Updater {
           'The file was deleted and nothing was installed.',
       )
     }
+
+    // Verified. Only now may the UI say so.
+    onProgress({ bytesDone, bytesTotal: Math.max(total, bytesDone), percent: 100 })
 
     return dest
   }

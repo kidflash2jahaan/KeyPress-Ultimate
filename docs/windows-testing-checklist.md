@@ -57,6 +57,38 @@ target it, press Start with a printable key. Record:
 
 Then repeat with KeyPress Ultimate itself started "as administrator" and confirm it works.
 
+**Wiring status.** `describeForegroundBlocking()` used to have no caller anywhere in the
+app, so this whole mitigation never ran and the `injection-blocked` message the session
+controller already carried was unreachable. The Windows side now exposes a narrow,
+non-throwing entry point for the injector to call on a focus transition:
+
+```ts
+describeInjectionBlocking(): InjectionBlockingReport
+```
+
+```ts
+interface InjectionBlockingReport {
+  ok: boolean                                // positive reason to think injection lands
+  severity: 'ok' | 'info' | 'warn' | 'blocked'
+  code: 'injection-blocked' | null           // the ONLY thing a caller should branch on
+  message: string                            // user-facing, never empty
+  appName: string | null
+  appPid: number | null
+  unavailable: boolean                       // the check could not run at all
+}
+```
+
+The caller contract is one branch: **abort iff `code === 'injection-blocked'`**. A `warn`
+(`probably-elevated`) must NOT abort, because a denied `OpenProcess` is also what
+anti-cheat looks like and refusing to fire there would break the app for the games it
+exists to serve. `describeInjectionBlocking()` never throws, caches per foreground pid for
+3 s so an alt-tab storm cannot turn it into a per-tick cost, and parks its last answer in
+`getDiagnostics().lastBlockingCheck` for bug reports.
+
+**Also test.** With a normal (non-elevated) build and Task Manager frontmost, confirm the
+app now refuses to fire and shows the "running as administrator" sentence, rather than
+showing "Firing" into a void.
+
 ---
 
 ## R-02 — Scan-code injection acceptance in real games — **HIGH**
@@ -107,24 +139,54 @@ to check `GetAsyncKeyState` and correct as necessary, which is worth doing on St
 
 ---
 
-## R-04 — NumLock and Pause scan codes — **MEDIUM**
+## R-04 — NumLock and Pause scan codes — **RESOLVED IN DATA, still needs a live check**
 
-Microsoft's "Extended-Key Flag" prose says explicitly:
+**This was a real wrong-key bug, and it is now fixed.** The data used to follow
+Chromium's `dom_code_data.inc` (Pause `0x0045`, NumLock `0xE045`). Those are the values
+Windows **reports** in a `WM_KEYDOWN` lParam, not values `SendInput` **accepts**, and
+feeding them back in got both keys wrong:
 
-> Note that the Num Lock key has a separate scan code from the Pause key (which uses the
-> same scan code without the extended-key flag), and is **not considered an extended key**
-> despite appearing in the extended key name table.
+- Selecting **Pause** injected a bare scan code `0x45`. `kbdus.dll` maps `ausVK[0x45]` to
+  `VK_NUMLOCK | KBDEXT`, so that is Num Lock, not Pause. In tap mode at the 100 ms
+  default it toggled the user's Num Lock roughly ten times a second, silently flipping
+  the whole numpad under them, while the UI said "Firing" with Pause lit.
+- Selecting **Num Lock** injected `0xE0 0x45`. The E0 scan-code table (`aE0VscToVk`) has
+  entries at `0x1C`, `0x1D`, `0x35`, `0x37`, `0x38`, `0x46`-`0x53`, `0x5B`-`0x5D` and the
+  media keys, and **nothing at `0x45`**, so it resolved to no virtual key and did nothing.
 
-But the same page's scan-code table gives NumLock as `0x0045` **or** `0xE045` ("as seen
-in legacy keyboard messages"), and Chromium's `dom_code_data.inc` — which is what
-browsers and Electron use — maps NumLock to `0xE045`. The module follows Chromium.
+The reason the two sources disagree is the `KBDEXT` bit: the hardware sends a bare `0x45`
+for Num Lock and the driver adds the extended flag on the way up, so the reported form and
+the injectable form are genuinely different for this one key. Pause has no injectable
+scan code at all, because the hardware sequence is `E1 1D 45` and `KEYEVENTF_EXTENDEDKEY`
+only expresses an `E0` prefix.
 
-Pause is worse: the physical key emits the three-code sequence `0xE1 0x1D 0x45`, which a
-single `INPUT` record cannot express. The module sends bare `0x45`.
+**What ships now:**
 
-**Test.** Inject `NumLock`; does the NumLock LED / state toggle? Inject `Pause`; does
-anything receive it? If Pause does not work, grey it out in the UI rather than shipping a
-key that silently does nothing. Also try `0x0045` for NumLock as a fallback.
+| Key | winScanCode | winExtended | encodeKey path |
+|---|---|---|---|
+| `key-pause` | `null` | false | virtual key, `wVk = VK_PAUSE (0x13)`, no flags |
+| `numpad-num-lock` | `0x45` | **false** | scancode, `KEYEVENTF_SCANCODE`, no EXTENDEDKEY |
+
+`data/generate.mjs` refuses to write `keys.json` with the pair swapped, `data/validate.mjs`
+pins both and also asserts that no two scancode-injectable keys share a
+`(winScanCode, winExtended)` pair, and `windows.test.ts` asserts that no key but Num Lock
+injects a bare `0x45` and that no key at all injects `0xE0 0x45`.
+
+**Still needs a live check (this is the part no test on macOS can answer):**
+
+1. Inject `NumLock` in tap mode. Does the Num Lock LED / state toggle exactly once per
+   tap? (If it does nothing, try `winExtended: true` and report back, but the E0 table
+   says it should not work.)
+2. Inject `Pause` in hold mode at Notepad and at a game. Does anything receive it? A
+   VK-only `SendInput` fills the scan code itself via `MapVirtualKey`, so a Raw-Input or
+   DirectInput game may still see nothing.
+3. **Specifically confirm holding Pause no longer touches Num Lock.** Turn Num Lock on,
+   hold Pause for 10 seconds in every mode, and confirm the LED never changes. That is
+   the regression this fix exists for.
+4. If Pause turns out to reach nothing at all, the remaining option is to mark it
+   `holdable: false` or unavailable on Windows in `data/generate.mjs`, rather than
+   shipping a key that does nothing. It is at least no longer a key that does the *wrong*
+   thing.
 
 ---
 
@@ -151,6 +213,31 @@ available through PROCESS_QUERY_INFORMATION" and as sufficient for
 Also confirm the numeric assumptions: `TOKEN_QUERY = 0x0008` (Learn does not give token
 access rights numerically; this comes from `winnt.h`) and `TokenElevation = 20` (derived
 by counting the `TOKEN_INFORMATION_CLASS` enum from `TokenUser = 1`).
+
+**Changes made blind, which need confirming on a real machine:**
+
+- `getSelfElevation()` now caches only a **definitive** answer (`known-elevated` /
+  `known-not-elevated`). It used to cache `unknown` too, which would have pinned a
+  transient failure for the life of the process, and this value decides whether the app
+  tells the user to restart as administrator. Confirm the first call after `init()`
+  returns a definitive state, i.e. that the cache is actually populated and this is not
+  silently re-querying on every transition.
+- `tokenElevationOf()` now returns `unknown` instead of calling `CloseHandle` when
+  `OpenProcessToken` reports success but hands back a null handle. I have never seen this
+  happen and cannot make it happen; it is there because `CloseHandle(NULL)` raises under a
+  debugger.
+- The classifier no longer gives a blanket all-clear when **we** are elevated and the
+  target is `probably-elevated`. That combination means System, a protected process, or
+  anti-cheat, and being elevated is not enough. Confirm by running elevated with an
+  anti-cheat service frontmost: expected `severity: 'warn'`, not `'ok'`.
+- **The `probably-elevated` signal itself is still unproven** (that is the original R-05).
+  If a denied `OpenProcess` turns out to be common against ordinary non-elevated targets,
+  every user will see the anti-cheat warning on every transition and the `warn` branch
+  should be softened to `info`. Watch for this first.
+- The 3 s per-pid cache in `describeInjectionBlocking()` was chosen blind. Elevation
+  cannot change for the life of a process, so the TTL only exists so a recycled pid
+  cannot pin a wrong answer. If focus transitions turn out to be expensive on real
+  hardware, raise it; if pid reuse is observed inside 3 s, lower it.
 
 ---
 
@@ -356,6 +443,7 @@ The spike's loose exports are now methods on one adapter, `windowsNative`, expor
 | `listApplications()` (rich entries) | `windowsNative.listWindows()`; `listApplications()` now returns the shared `AppInfo` shape |
 | `getHeld()` | `getHeldKeyIds()` and `getHeldButtonIds()` |
 | `isTrusted()` / `openAccessibilitySettings()` | `hasPermission()` / `openPermissionSettings()` |
+| (new) | `windowsNative.describeInjectionBlocking()`, the non-throwing narrowed form the injector calls on a focus transition; `getLastBlockingCheck()` and `clearBlockingCache()` sit alongside it |
 
 `init()` is now explicit and asynchronous, and it must be awaited before anything that
 touches the FFI. A failure is also parked on `windowsNative.initError`.
@@ -371,6 +459,7 @@ console.log(JSON.stringify(windowsNative.getDiagnostics(), null, 2));
 console.log('foreground:', JSON.stringify(windowsNative.getForegroundApplication(), null, 2));
 console.log('frontmost pid:', windowsNative.getFrontmostPid());
 console.log('blocking:', JSON.stringify(windowsNative.describeForegroundBlocking(), null, 2));
+console.log('blocking (narrowed, what the hold loop sees):', JSON.stringify(windowsNative.describeInjectionBlocking(), null, 2));
 const apps = windowsNative.listWindows();
 console.log('apps:', apps.length);
 for (const a of apps) console.log('  ', a.pid, a.windowCount, a.name, '|', a.title, '|', a.path);

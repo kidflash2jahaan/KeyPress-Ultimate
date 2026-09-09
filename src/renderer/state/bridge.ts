@@ -58,6 +58,19 @@ export interface PermissionState {
  */
 export type ArmResult = { ok: true } | { ok: false; message: string }
 
+/**
+ * How a download ended.
+ *
+ * `void` is what main returns today, and it is not enough: main abandons the
+ * download and returns normally when the build cannot self-update, and the ipc
+ * wrapper swallows a throw from a dropped connection or a checksum mismatch.
+ * Either way the renderer is told nothing and the banner sits on
+ * "Downloading..." forever. The renderer therefore treats "came back without
+ * ever reaching 100%" as an abandoned download, and reads this result when
+ * main starts sending one.
+ */
+export type DownloadResult = { ok: true } | { ok: false; message?: string }
+
 export interface UpdateProgress {
   receivedBytes: number
   totalBytes: number
@@ -124,7 +137,8 @@ export interface KpuBridge {
 
   updates: {
     check(): Promise<UpdateInfo | null>
-    download(): Promise<void>
+    /** Resolves when the download has finished, failed, or been abandoned. */
+    download(): Promise<DownloadResult | void>
     install(): Promise<void>
     openReleasesPage(): Promise<void>
   }

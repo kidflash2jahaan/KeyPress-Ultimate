@@ -28,6 +28,7 @@ import type {
 import { FOCUS_SETTLE_MS } from '../../shared/ipc'
 import type {
   ArmResult,
+  DownloadResult,
   KpuBridge,
   KpuEventMap,
   KpuEventName,
@@ -233,6 +234,7 @@ export function createMockBridge(options: MockBridgeOptions = {}): KpuBridge {
   let focusIndex = 0
   let focusedSince = Date.now()
   let timer: ReturnType<typeof setInterval> | null = null
+  let settleTimer: ReturnType<typeof setTimeout> | null = null
 
   let session: SessionState = {
     phase: 'idle',
@@ -301,13 +303,41 @@ export function createMockBridge(options: MockBridgeOptions = {}): KpuBridge {
     })
   }
 
+  function clearSettle(): void {
+    if (settleTimer === null) return
+    clearTimeout(settleTimer)
+    settleTimer = null
+  }
+
+  /**
+   * Publish now, then again once the focus has settled.
+   *
+   * The second pass is not decoration. `evaluate` reads the settle gate
+   * against the clock, and at the moment focus changes (or a session is armed)
+   * nothing has settled yet, so the first pass can only ever say
+   * 'armed-waiting'. Without the follow-up the mock would sit there until the
+   * next focus rotation, and pressing Start on an already-frontmost target
+   * would look like the app had failed. The real hold loop re-ticks every 25ms
+   * and gets this for free; here it is one timer.
+   */
+  function evaluateAndSettle(): void {
+    clearSettle()
+    evaluate()
+    if (armedConfig === null) return
+    const remaining = focusedSince + FOCUS_SETTLE_MS - Date.now()
+    settleTimer = setTimeout(
+      () => {
+        settleTimer = null
+        evaluate()
+      },
+      Math.max(0, remaining) + 20,
+    )
+  }
+
   function tick(): void {
     focusIndex += 1
     focusedSince = Date.now()
-    evaluate()
-    // Settle, then re-evaluate, so 'armed-waiting' is briefly visible on the
-    // way into 'firing' exactly as it is in the real hold loop.
-    setTimeout(evaluate, FOCUS_SETTLE_MS + 20)
+    evaluateAndSettle()
   }
 
   function startTimer(): void {
@@ -367,12 +397,13 @@ export function createMockBridge(options: MockBridgeOptions = {}): KpuBridge {
         armedConfig = { ...config }
         focusedSince = Date.now()
         session = { ...session, startedAt: Date.now(), message: null }
-        evaluate()
+        evaluateAndSettle()
         return { ok: true }
       },
 
       async disarm() {
         armedConfig = null
+        clearSettle()
         publish({
           ...session,
           phase: 'idle',
@@ -432,20 +463,32 @@ export function createMockBridge(options: MockBridgeOptions = {}): KpuBridge {
       async check() {
         return options.offerUpdate === true ? FAKE_UPDATE : null
       },
-      async download() {
+      /**
+       * Resolves when the bytes are in, the way main does: it awaits the real
+       * download before returning. Resolving early would tell the renderer the
+       * call was over while the progress was still arriving, and the renderer
+       * reads "came back before 100%" as an abandoned download.
+       */
+      async download(): Promise<DownloadResult> {
         const total = FAKE_UPDATE.sizeBytes
         let received = 0
         const step = Math.round(total / 24)
-        const id = setInterval(() => {
-          received = Math.min(total, received + step)
-          const progress: UpdateProgress = {
-            receivedBytes: received,
-            totalBytes: total,
-            fraction: received / total,
-          }
-          emit('updateProgress', progress)
-          if (received >= total) clearInterval(id)
-        }, 180)
+        await new Promise<void>((resolve) => {
+          const id = setInterval(() => {
+            received = Math.min(total, received + step)
+            const progress: UpdateProgress = {
+              receivedBytes: received,
+              totalBytes: total,
+              fraction: received / total,
+            }
+            emit('updateProgress', progress)
+            if (received >= total) {
+              clearInterval(id)
+              resolve()
+            }
+          }, 180)
+        })
+        return { ok: true }
       },
       async install() {
         // A real install relaunches the app. Nothing to fake.

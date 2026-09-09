@@ -663,16 +663,94 @@ describe('the remaining channels', () => {
     expect(harness.errors.some((entry) => entry.message === 'apps:list')).toBe(true)
   })
 
-  it('swallows a failing update download rather than rejecting the invoke', async () => {
-    const harness = makeHarness()
-    harness.spies.download.mockRejectedValue(new Error('offline'))
-    await expect(harness.invoke(IPC_INVOKE.updatesDownload)).resolves.toBeUndefined()
-    expect(harness.errors.some((entry) => entry.message === 'updates:download')).toBe(true)
-  })
-
   it('opens the permission pane through the dependency, not a renderer string', async () => {
     const harness = makeHarness()
     await harness.invoke(IPC_INVOKE.permissionsOpenSettings, 'file:///etc/passwd')
     expect(harness.spies.openSettings).toHaveBeenCalledWith()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The update channels.
+//
+// This app replaces its own binary, so the update UI is the one place where a
+// swallowed error becomes a lie: a check that could not run must not look like
+// "you are up to date", and a refused download must not leave the banner
+// saying "Downloading…" forever. These channels forward their rejections.
+// ---------------------------------------------------------------------------
+
+describe('the update channels', () => {
+  const RATE_LIMITED =
+    "GitHub's release API is rate limited right now (HTTP 403). Try again later, " +
+    'or open the Releases page.'
+
+  function updatesHarness(over: Partial<IpcHandlerDeps['updates']> = {}): Harness {
+    return makeHarness({
+      updates: {
+        check: async () => null,
+        download: async () => undefined,
+        install: async () => undefined,
+        openReleasesPage: async () => undefined,
+        ...over,
+      },
+    })
+  }
+
+  it('distinguishes "checked, nothing new" from "could not check"', async () => {
+    const current = updatesHarness()
+    await expect(current.invoke(IPC_INVOKE.updatesCheck)).resolves.toBeNull()
+
+    const broken = updatesHarness({
+      check: async () => {
+        throw new Error(RATE_LIMITED)
+      },
+    })
+    // The failure must NOT arrive as null, which the renderer reads as
+    // "up to date" and which silently clears an update banner.
+    await expect(broken.invoke(IPC_INVOKE.updatesCheck)).rejects.toThrow(RATE_LIMITED)
+    expect(broken.errors.some((entry) => entry.message === 'updates:check')).toBe(true)
+  })
+
+  it('forwards a refused download so the UI can stop saying "Downloading…"', async () => {
+    const refusal =
+      'No SHA-256 was published for KeyPress-Ultimate-1.2.0-universal-mac.zip, so it ' +
+      'cannot be verified. Download it from the Releases page instead.'
+    const harness = updatesHarness({
+      download: async () => {
+        throw new Error(refusal)
+      },
+    })
+
+    // The user-facing sentence has to survive the crossing: it is the only
+    // thing that tells the user to use the Releases page instead.
+    await expect(harness.invoke(IPC_INVOKE.updatesDownload)).rejects.toThrow(refusal)
+    expect(harness.errors.some((entry) => entry.message === 'updates:download')).toBe(true)
+  })
+
+  it('forwards a failed install rather than resolving as though it worked', async () => {
+    const harness = updatesHarness({
+      install: async () => {
+        throw new Error('codesign rejected the downloaded bundle, so it was not installed.')
+      },
+    })
+    await expect(harness.invoke(IPC_INVOKE.updatesInstall)).rejects.toThrow(/codesign/)
+    expect(harness.errors.some((entry) => entry.message === 'updates:install')).toBe(true)
+  })
+
+  it('still resolves quietly when the update channels succeed', async () => {
+    const harness = updatesHarness()
+    await expect(harness.invoke(IPC_INVOKE.updatesDownload)).resolves.toBeUndefined()
+    await expect(harness.invoke(IPC_INVOKE.updatesInstall)).resolves.toBeUndefined()
+    await expect(harness.invoke(IPC_INVOKE.updatesOpenReleasesPage)).resolves.toBeUndefined()
+    expect(harness.errors).toEqual([])
+  })
+
+  it('rejects with a real Error even when the updater throws a bare value', async () => {
+    const harness = updatesHarness({
+      check: async () => {
+        throw 'offline'
+      },
+    })
+    await expect(harness.invoke(IPC_INVOKE.updatesCheck)).rejects.toThrow('offline')
   })
 })

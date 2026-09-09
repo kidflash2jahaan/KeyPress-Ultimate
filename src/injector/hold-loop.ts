@@ -29,6 +29,9 @@ import { FOCUS_SETTLE_MS, FOCUS_TICK_MS, MODIFIER_CLEAR_TIMEOUT_MS } from '@shar
 import { getKeyById, getMouseButtonById, isKeyAvailableOn } from '@shared/keys'
 import type { KeyDef, MouseDef, Platform, SessionConfig, Settings } from '@shared/types'
 import type { NativeInput, NativeInputExtras } from './native/types'
+// Type-only, so importing the loop never pulls the Windows adapter (and koffi)
+// into a macOS process. `import type` is erased entirely at compile time.
+import type { ForegroundBlockingReport } from './native/windows'
 import type { Clock, Scheduler } from './scheduler'
 import { createScheduler, realClock } from './scheduler'
 
@@ -57,6 +60,14 @@ export interface NativeInputOptionalExtras {
   endHighResolutionTimers?(period?: number): unknown
   /** Adapter-visible settings, e.g. the Windows virtual-key fallback. */
   applySettings?(settings: Settings): void
+  /**
+   * Windows only. "Will anything we post actually reach whatever is in front
+   * right now?" `SendInput` cannot answer that: under UIPI it reports the full
+   * count inserted and leaves GetLastError at zero while nothing lands, so
+   * without this call the app would confidently claim to be holding W into a
+   * void. Absent on macOS, where there is no equivalent block.
+   */
+  describeForegroundBlocking?(): ForegroundBlockingReport
 }
 
 /** What the injector actually holds: the locked contract plus optional extras. */
@@ -86,6 +97,15 @@ export const MIN_TICK_MS = 5
 export const TARGET_SNAPSHOT_MAX_AGE_MS = 1_000
 /** Floor on rebuild frequency, so an unknown foreground app cannot cause a rebuild every tick. */
 export const TARGET_SNAPSHOT_MIN_REFRESH_MS = 250
+/**
+ * How often the identity behind the pid we are pressing into is re-confirmed.
+ *
+ * A pid is not an identity. Windows hands pids back out of a free list within
+ * seconds, so "same number as last tick" is not proof the process behind it is
+ * the one we authorised; without this the loop would keep asserting into
+ * whatever inherited the number until the snapshot aged out.
+ */
+export const TARGET_IDENTITY_RECHECK_MS = 250
 
 // ---------------------------------------------------------------------------
 // Public shape
@@ -115,6 +135,17 @@ export type ReleaseReason =
   | 'assert-aborted'
   | 'native-error'
 
+/**
+ * The loop's half of the `blocked` protocol message: a target that is
+ * frontmost and being pressed into while the OS is silently discarding
+ * everything we post.
+ */
+export interface BlockedTargetEvent {
+  code: 'elevated-target'
+  message: string
+  appName: string
+}
+
 export interface HoldLoopState {
   phase: HoldLoopPhase
   onTarget: boolean
@@ -135,6 +166,15 @@ export interface HoldLoopOptions {
   onState?: (state: HoldLoopState) => void
   /** Fired once per session-ending release, with the number of items released. */
   onReleased?: (count: number, reason: ReleaseReason) => void
+  /**
+   * Fired when the loop ends its OWN session, i.e. for a reason main did not
+   * ask for. Main owns the session lifecycle, so a self-disarm it cannot see
+   * would leave it armed forever with a loop that has stopped ticking. A
+   * disarm main requested does not fire this: main already knows.
+   */
+  onSelfDisarm?: (reason: DisarmReason) => void
+  /** Fired once per transition into a blocked target, never on every tick. */
+  onBlocked?: (event: BlockedTargetEvent) => void
   onError?: (code: InjectorErrorCode, message: string) => void
   onLog?: (message: string) => void
 }
@@ -234,7 +274,12 @@ export function createHoldLoop(options: HoldLoopOptions): HoldLoop {
   let held: HeldItem[] = []
   /** The pid we are currently pressing into. Null whenever nothing is held. */
   let activePid: number | null = null
+  /** The identity `activePid` was authorised as, re-confirmed on a bounded schedule. */
+  let activeIdentity: string | null = null
+  let identityVerifiedAt = 0
   let lastFocusedPid: number | null = null
+  /** The pid a `blocked` report has already gone out for, so it goes out once. */
+  let blockedReportedPid: number | null = null
 
   let focusGainedAt = 0
   let gateStartedAt = 0
@@ -280,40 +325,80 @@ export function createHoldLoop(options: HoldLoopOptions): HoldLoop {
     }
   }
 
-  function refreshIdentities(now: number): void {
+  /** False when the rebuild failed and the previous snapshot is still in place. */
+  function refreshIdentities(now: number): boolean {
     try {
       const apps = native.listApplications()
       const next = new Map<number, string>()
       for (const app of apps) next.set(app.pid, app.identity)
       pidIdentities = next
       snapshotAt = now
+      return true
     } catch (error) {
       snapshotAt = now
       reportError('unknown', `listApplications failed: ${String(error)}`)
+      return false
     }
   }
 
   function identityForPid(pid: number, now: number): string | null {
     const age = now - snapshotAt
     const known = pidIdentities.get(pid)
-    if (known !== undefined && age < TARGET_SNAPSHOT_MAX_AGE_MS) return known
-    if (known === undefined && age < TARGET_SNAPSHOT_MIN_REFRESH_MS) return null
+    // The pid we are already pressing into has its own re-verification
+    // schedule (`verifyActiveIdentity`), so the cache may answer for it for the
+    // snapshot's full lifetime. Any other pid is about to *start* a firing
+    // session: authorising that from a snapshot up to a second old is how a
+    // recycled pid gets pressed into, so it only gets a cache hit while the
+    // snapshot is younger than the rebuild floor.
+    const maxAge = pid === activePid ? TARGET_SNAPSHOT_MAX_AGE_MS : TARGET_SNAPSHOT_MIN_REFRESH_MS
+    if (known !== undefined && age < maxAge) return known
+    if (age < TARGET_SNAPSHOT_MIN_REFRESH_MS) return known ?? null
     refreshIdentities(now)
     return pidIdentities.get(pid) ?? null
   }
 
-  function isTargetPid(pid: number, now: number): boolean {
-    if (config === null) return false
-    if (ourPids.has(pid)) return false
+  /** The target identity this pid resolves to, or null when it is not a target. */
+  function targetIdentityForPid(pid: number, now: number): string | null {
+    if (config === null) return null
+    if (ourPids.has(pid)) return null
     const identity = identityForPid(pid, now)
-    return identity !== null && config.targets.has(identity)
+    if (identity === null || !config.targets.has(identity)) return null
+    return identity
+  }
+
+  /**
+   * Confirm the pid we are pressing into still belongs to the process we
+   * authorised. A pid is a reusable number, not an identity: on Windows it
+   * comes back off a free list within seconds, and a numeric-only check would
+   * keep asserting into whichever process inherited it.
+   *
+   * Bounded to one rebuild per `TARGET_IDENTITY_RECHECK_MS`, because this sits
+   * on the path of every assert and `listApplications()` enumerates windows.
+   */
+  function verifyActiveIdentity(): boolean {
+    if (activePid === null || activeIdentity === null) return true
+    const now = clock.now()
+    if (now - identityVerifiedAt < TARGET_IDENTITY_RECHECK_MS) return true
+    identityVerifiedAt = now
+    // A native failure is not evidence that the target died. Fail open and try
+    // again at the next recheck rather than dropping a legitimate hold. A
+    // snapshot another path has just rebuilt is fresh enough to answer with.
+    if (now - snapshotAt >= TARGET_IDENTITY_RECHECK_MS && !refreshIdentities(now)) return true
+    const identity = pidIdentities.get(activePid)
+    if (identity === activeIdentity) return true
+    log(`pid ${activePid} is no longer ${activeIdentity} (now ${identity ?? 'gone'}), letting go`)
+    return false
   }
 
   /**
    * Re-read the frontmost pid and confirm it is still the pid we are pressing
    * into. Called immediately before every assert, without exception.
+   *
+   * Identity is checked first so that the frontmost-pid read stays the very
+   * last thing that happens before the assert.
    */
   function stillOnTarget(): boolean {
+    if (!verifyActiveIdentity()) return false
     const pid = readFrontmostPid()
     return pid !== null && pid === activePid && !ourPids.has(pid)
   }
@@ -412,6 +497,7 @@ export function createHoldLoop(options: HoldLoopOptions): HoldLoop {
   function abort(reason: ReleaseReason): void {
     releaseHeld(reason, true)
     activePid = null
+    activeIdentity = null
     phase = armed ? 'armed-waiting' : 'idle'
   }
 
@@ -440,16 +526,52 @@ export function createHoldLoop(options: HoldLoopOptions): HoldLoop {
   // Modes
   // -------------------------------------------------------------------------
 
+  /**
+   * Windows UIPI: a normal-integrity process cannot post input into an
+   * elevated one, and `SendInput` reports success anyway. So the moment we
+   * start pressing into a target, ask the adapter whether anything can land,
+   * and say so once. The alternative is what the app did before: hold into a
+   * void in complete silence while the UI claims the key is down.
+   *
+   * Reported on transition only. One report per target, however long the
+   * session runs and however often focus flicks away and back.
+   */
+  function checkForegroundBlocking(): void {
+    const describe = native.describeForegroundBlocking
+    if (typeof describe !== 'function') return
+    if (activePid === null || blockedReportedPid === activePid) return
+    let report: ForegroundBlockingReport
+    try {
+      report = describe.call(native)
+    } catch (error) {
+      reportError('unknown', `describeForegroundBlocking failed: ${String(error)}`)
+      return
+    }
+    // `ok` is true only when there is positive reason to think injection lands.
+    // A report about some other window raced with us and says nothing about the
+    // pid we are pressing into, so it is discarded rather than misattributed.
+    if (report.ok || report.app === null || report.app.pid !== activePid) return
+    blockedReportedPid = activePid
+    log(`foreground blocking (${report.severity}): ${report.message}`)
+    options.onBlocked?.({
+      code: 'elevated-target',
+      message: report.message,
+      appName: report.app.name,
+    })
+  }
+
   function enterFiring(now: number): void {
     if (config === null) return
     phase = 'firing'
     if (currentMode === 'tap') {
       tapStartedAt = now
       runTap(now)
+      checkForegroundBlocking()
       return
     }
     if (!press()) return
     nextRepeatAt = now + config.repeatInitialMs
+    checkForegroundBlocking()
   }
 
   function runRepeat(now: number): void {
@@ -500,20 +622,27 @@ export function createHoldLoop(options: HoldLoopOptions): HoldLoop {
 
     if (maxSessionMs > 0 && now - sessionStartedAt >= maxSessionMs) {
       log('max session time reached')
-      disarm('max-session-time')
+      selfDisarm('max-session-time')
       return
     }
 
     const pid = readFrontmostPid()
     lastFocusedPid = pid
     const ours = pid !== null && ourPids.has(pid)
-    const onTarget = pid !== null && !ours && isTargetPid(pid, now)
+    const identity = pid === null || ours ? null : targetIdentityForPid(pid, now)
+    let onTarget = pid !== null && identity !== null
+    // A pid is a reusable number, not an identity. Before treating the pid we
+    // are already pressing into as still ours, confirm the process behind it
+    // has not been replaced. This has to happen here and not only before an
+    // assert, because `hold` mode never asserts again after the first press.
+    if (onTarget && pid === activePid && !verifyActiveIdentity()) onTarget = false
 
     if (!onTarget) {
       if (held.length > 0 || activePid !== null) {
         // Focus loss releases immediately. No settle, no gate, no delay.
         releaseHeld(ours ? 'self-target' : 'focus-lost', true)
         activePid = null
+        activeIdentity = null
       }
       if (ours) log('our own window is frontmost, staying armed and pressing nothing')
       phase = 'armed-waiting'
@@ -524,6 +653,8 @@ export function createHoldLoop(options: HoldLoopOptions): HoldLoop {
     if (activePid !== pid) {
       if (held.length > 0) releaseHeld('focus-changed', true)
       activePid = pid
+      activeIdentity = identity
+      identityVerifiedAt = now
       focusGainedAt = now
       phase = 'settling'
     }
@@ -701,6 +832,8 @@ export function createHoldLoop(options: HoldLoopOptions): HoldLoop {
     armed = true
     phase = 'armed-waiting'
     activePid = null
+    activeIdentity = null
+    blockedReportedPid = null
     held = []
     lastStateSignature = ''
     sessionStartedAt = clock.now()
@@ -728,8 +861,24 @@ export function createHoldLoop(options: HoldLoopOptions): HoldLoop {
     armed = false
     config = null
     activePid = null
+    activeIdentity = null
+    blockedReportedPid = null
     phase = 'idle'
     return count
+  }
+
+  /**
+   * The loop deciding on its own that the session is over.
+   *
+   * Main owns the session lifecycle and it is not the one asking here, so it
+   * has to be told: `disarm()` on its own stops the scheduler, and the last
+   * state frame it emits is indistinguishable from an ordinary focus loss, so
+   * main would soft-release and stay armed forever against a loop that has
+   * stopped ticking.
+   */
+  function selfDisarm(reason: DisarmReason): void {
+    disarm(reason)
+    options.onSelfDisarm?.(reason)
   }
 
   function disarm(reason: DisarmReason): void {

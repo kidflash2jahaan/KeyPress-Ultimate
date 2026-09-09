@@ -10,13 +10,28 @@
  * introspect and no browser in the loop, so a tiny brace-matching scanner is
  * used instead of pulling in a full CSS parser.
  */
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const read = (name: string): string => readFileSync(resolve(here, name), 'utf8')
+
+/** Every stylesheet the renderer ships, for the rules that must hold in all of them. */
+function componentStylesheets(): Array<[string, string]> {
+  const roots = [resolve(here, '.'), resolve(here, '../components'), resolve(here, '..')]
+  const seen = new Map<string, string>()
+  for (const root of roots) {
+    if (!existsSync(root)) continue
+    for (const entry of readdirSync(root)) {
+      if (!entry.endsWith('.css')) continue
+      const file = resolve(root, entry)
+      seen.set(file, readFileSync(file, 'utf8'))
+    }
+  }
+  return [...seen].map(([file, css]) => [file.slice(file.lastIndexOf('/') + 1), css])
+}
 
 const tokensCss = read('tokens.css')
 const globalCss = read('global.css')
@@ -216,6 +231,17 @@ describe('the one rule: colour encodes state', () => {
     for (const theme of [light, darkAuto]) {
       expect(token(theme, '--sel')).not.toBe(token(theme, '--sig'))
       expect(token(theme, '--sel-edge')).not.toBe(token(theme, '--sig'))
+    }
+  })
+
+  it('never paints --sig as a text colour', () => {
+    // --sig is tuned to the 3:1 that 1.4.11 asks of a graphical object, not to
+    // the 4.5:1 that 1.4.3 asks of text. On --plate it measures 3.20:1 in the
+    // light theme, so the status pill's own label was the least legible text
+    // in the app. It carries the state as a border, a fill and a glow instead.
+    for (const [name, css] of componentStylesheets()) {
+      const offenders = [...stripComments(css).matchAll(/(^|[^-\w])color:\s*var\(--sig\s*[,)]/gm)]
+      expect(offenders.map(() => name), `${name} paints text in --sig`).toEqual([])
     }
   })
 

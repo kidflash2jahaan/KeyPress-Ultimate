@@ -42,34 +42,93 @@ export const MAIN_ROWS_Y_U = 1 + FUNCTION_GAP_U // 1.5
 
 /** `--u` at the default desktop size. 22.5u x 6.5u -> 1080 x 312 px. */
 export const UNIT_FULL = 48
-/** `--u` in the compact band, where dual legends are still readable. */
+/**
+ * The comfortable ceiling. A real switch pitch is 19.05mm, which is 72 CSS px
+ * at 96dpi, so 64 is still under life size: the board can grow into a wide
+ * window instead of floating in it, and it still never outgrows the hardware
+ * it is a picture of.
+ */
+export const UNIT_MAX = 64
+/**
+ * Retained for the tests and for anyone reading old notes: the unit the board
+ * used to step down to. Nothing steps any more, because a 29% size cut to
+ * answer a 4% shortfall in width is what made dual-legend caps unreadable at
+ * the 1100px minimum window.
+ */
 export const UNIT_COMPACT = 34
-/** The floor. Below this the plate scrolls horizontally instead of shrinking. */
+/** The floor. Below this the plate scrolls inside its band instead of shrinking. */
 export const UNIT_MIN = 30
 
 /** Horizontal padding the plate adds around the board, as a multiple of `--u`. */
 export const PLATE_PAD_U = 0.25
 
 /**
- * The largest of the three sanctioned unit sizes whose plate fits in
- * `availablePx`. Never returns less than `UNIT_MIN`: at that point the plate
- * scrolls inside its own container rather than shrinking the legends further.
+ * Gutter between keycaps, as a fraction of `--u`. Subtracted INSIDE each unit
+ * box, never added as an outer margin, so 1u and 2 x 0.5u occupy identical
+ * pitch. It lives here with the rest of the board geometry and is written onto
+ * the plate next to `--u`: a `--gap` declared on :root is substituted against
+ * :root's `--u` and can never track the plate's.
  */
+export const GAP_RATIO = 0.09
+
+/** The keycap gutter in CSS pixels at a given unit. */
+export function gapPx(unit: number): number {
+  return unit * GAP_RATIO
+}
+
+/** Plate width and height in key units, the board plus its own padding. */
+export const PLATE_WIDTH_U = BOARD_WIDTH_U + PLATE_PAD_U * 2 // 23
+export const PLATE_HEIGHT_U = BOARD_HEIGHT_U + PLATE_PAD_U * 2 // 7
+
+/**
+ * Fixed pixels the plate and its scroller add around the board on each axis:
+ * the plate's 1px border on both sides plus the scroller's own padding. Held
+ * back from the solve so a plate is never one pixel too wide for its band,
+ * which would put a scrollbar under a board that visibly fits.
+ */
+export const PLATE_CHROME_PX = 10
+
+/**
+ * The key unit that fills `availableWidthPx` x `availableHeightPx`.
+ *
+ * Solved rather than stepped, which is what tokens.css and styles/README.md
+ * have always documented. Both axes matter: the window is short far more often
+ * than it is narrow, so a width-only solve either overflows the band or leaves
+ * the plate stranded at a fixed size inside it.
+ *
+ * Clamped to [UNIT_MIN, UNIT_MAX]. Below the floor the plate scrolls inside its
+ * own container rather than shrinking the legends further.
+ */
+export function unitForSpace(availableWidthPx: number, availableHeightPx = Infinity): number {
+  const byWidth = (availableWidthPx - PLATE_CHROME_PX) / PLATE_WIDTH_U
+  const byHeight = (availableHeightPx - PLATE_CHROME_PX) / PLATE_HEIGHT_U
+  const solved = Math.min(byWidth, byHeight)
+  if (!Number.isFinite(solved)) return UNIT_MIN
+  return Math.min(UNIT_MAX, Math.max(UNIT_MIN, solved))
+}
+
+/** `unitForSpace` when only the width is known. */
 export function unitForWidth(availablePx: number): number {
-  for (const unit of [UNIT_FULL, UNIT_COMPACT] as const) {
-    if (plateWidthPx(unit) <= availablePx) return unit
-  }
-  return UNIT_MIN
+  return unitForSpace(availablePx)
 }
 
 /** Total plate width in CSS pixels at a given unit, padding included. */
 export function plateWidthPx(unit: number): number {
-  return (BOARD_WIDTH_U + PLATE_PAD_U * 2) * unit
+  return PLATE_WIDTH_U * unit
 }
 
 /** Total plate height in CSS pixels at a given unit, padding included. */
 export function plateHeightPx(unit: number): number {
-  return (BOARD_HEIGHT_U + PLATE_PAD_U * 2) * unit
+  return PLATE_HEIGHT_U * unit
+}
+
+/**
+ * The plate's outer width, border included. The lower band is capped to this
+ * so the mouse and the mode controls line up with the board's edges rather
+ * than stretching past it into empty margin.
+ */
+export function plateOuterWidthPx(unit: number): number {
+  return plateWidthPx(unit) + 2
 }
 
 // ---------------------------------------------------------------------------

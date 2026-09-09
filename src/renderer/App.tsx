@@ -1,9 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type JSX } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { getBaseKeys, isKeyAvailableOn } from '../shared/keys'
 import { ActionBar } from './components/ActionBar'
 import { Keyboard } from './components/Keyboard'
-import { unitForWidth, UNIT_FULL } from './components/keyboard-layout'
+import {
+  plateOuterWidthPx,
+  unitForSpace,
+  UNIT_FULL,
+  withPlatformLabels,
+} from './components/keyboard-layout'
 import { ModeControls } from './components/ModeControls'
 import { MousePad } from './components/MousePad'
 import { PermissionGate } from './components/PermissionGate'
@@ -17,13 +22,19 @@ import styles from './App.module.css'
 /**
  * The shell.
  *
- * Full-bleed horizontal bands, top to bottom: title, notices, targets,
- * keyboard, mouse and mode, action bar. No sidebar. A 260px rail would drop
- * the key unit to 34px at the 1100px minimum window, and a dual-legend cap at
- * 34px is not readable.
+ * Horizontal bands, top to bottom: title, notices, targets, keyboard, mouse
+ * and mode, action bar. No sidebar. A 260px rail leaves 786px of band at the
+ * 1100px minimum window, which solves to a 34px key unit, and a dual-legend
+ * cap at 34px is not readable.
+ *
+ * The chrome bands run full bleed; the instrument does not. The keyboard band
+ * grows into whatever height is left over and the plate is solved to fill it,
+ * then the mouse and mode band is capped to the plate's own width and centred
+ * under it. That is what stops the board floating in a wide empty margin with
+ * two stubs of content stranded below it.
  *
  * The one piece of state that lives here rather than in the store is the key
- * unit, because it is a function of the viewport rather than of the session.
+ * unit, because it is a function of the window rather than of the session.
  */
 export function App(): JSX.Element {
   const phase = useAppStore((state) => state.session.phase)
@@ -39,7 +50,12 @@ export function App(): JSX.Element {
 
   useTheme(theme)
 
-  const keys = useMemo(() => getBaseKeys(), [])
+  /**
+   * The legends are per platform, and this is where that happens: the board
+   * prints "⌘ Command" on macOS and "Win" on Windows off one shared key table.
+   * Without this the caps either side of the space bar both read "Meta".
+   */
+  const keys = useMemo(() => withPlatformLabels(getBaseKeys(), platform), [platform])
 
   /**
    * Lock keys have no held state, so Hold cannot express them. They stay on the
@@ -62,8 +78,11 @@ export function App(): JSX.Element {
     [actions],
   )
 
+  /** The instrument's own width, so the lower band lines up with the plate. */
+  const shellStyle = { '--plate-w': `${plateOuterWidthPx(unit)}px` } as CSSProperties
+
   return (
-    <div className={styles.shell} data-phase={phase} data-mode={mode}>
+    <div className={styles.shell} data-phase={phase} data-mode={mode} style={shellStyle}>
       <a className="skip-link" href="#board">
         Skip to the keyboard
       </a>
@@ -107,6 +126,10 @@ export function App(): JSX.Element {
 /**
  * The key unit, measured from the band rather than the window, so the value
  * stays right whatever padding the band ends up with.
+ *
+ * Both axes are measured. The band is a flex item with a definite height, so
+ * its box never depends on the plate it contains and the observer cannot chase
+ * its own tail.
  */
 function useKeyUnit(ref: React.RefObject<HTMLDivElement | null>): number {
   const [unit, setUnit] = useState(UNIT_FULL)
@@ -115,8 +138,8 @@ function useKeyUnit(ref: React.RefObject<HTMLDivElement | null>): number {
     const element = ref.current
     if (element === null) return
     const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width
-      if (width !== undefined) setUnit(unitForWidth(width))
+      const box = entries[0]?.contentRect
+      if (box !== undefined) setUnit(unitForSpace(box.width, box.height))
     })
     observer.observe(element)
     return () => observer.disconnect()

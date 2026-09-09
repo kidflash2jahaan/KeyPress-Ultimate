@@ -491,6 +491,29 @@ describe('panic hotkey', () => {
     const result = h.controller.arm({ ...CONFIG, keyIds: ['key-w', 'key-k'] })
     expect(result).toMatchObject({ ok: false, code: 'panic-hotkey-conflict' })
     expect(h.injectors).toHaveLength(0)
+    if (result.ok) throw new Error('unreachable')
+    // The message has to name the key and an action that exists: Settings shows
+    // the panic hotkey but cannot edit it.
+    expect(result.message).toContain('Deselect')
+    expect(result.message).not.toContain('Settings')
+  })
+
+  it('costs the user no modifier: Shift+W starts fine under the default hotkey', () => {
+    // CommandOrControl+Alt+Shift+K used to make all eight modifiers unholdable,
+    // so the most ordinary hold in any game was refused with stock settings.
+    const h = setup()
+
+    expect(h.controller.arm({ ...CONFIG, keyIds: ['key-left-shift', 'key-w'] })).toEqual({
+      ok: true,
+    })
+    expect(h.injectors).toHaveLength(1)
+  })
+
+  it('lets the Windows key and Control be held under the default hotkey', () => {
+    for (const id of ['key-left-meta', 'key-right-meta', 'key-left-ctrl', 'key-left-alt']) {
+      const h = setup()
+      expect(h.controller.arm({ ...CONFIG, keyIds: [id] })).toEqual({ ok: true })
+    }
   })
 
   it('is registered only while a session is armed', () => {
@@ -793,15 +816,71 @@ describe('unconfirmed releases', () => {
     expect(h.journal.present).toBe(false)
   })
 
-  it('does not wait for a confirmation when the session never pressed anything', () => {
+  it('still demands proof when the session only looks like it never pressed anything', () => {
+    // Main's picture of the injector lags it by one IPC hop: the injector
+    // presses and then emits its state. A session that reads as idle can
+    // already be holding a key, so "nothing was ever held" is never a reason to
+    // kill the injector and delete the journal in the same tick as the disarm.
     const h = setup()
     h.controller.arm(CONFIG)
     h.injector().wedged = true
 
     h.controller.disarm('user-stop')
+    expect(h.journal.present).toBe(true) // still waiting for proof
+    expect(h.injector().killed).toBe(false)
 
+    h.clock.advance(250)
+
+    expect(h.releases[0]?.confirmed).toBe(false)
+    expect(h.journal.present).toBe(true)
+    expect(h.controller.getState().message).toContain('Some keys may still be held')
+  })
+
+  it('clears the journal for a never-fired session once something actually released', () => {
+    const fallback = vi.fn(() => 0)
+    const h = setup({ releaseFallback: fallback })
+    h.controller.arm(CONFIG)
+    h.injector().wedged = true
+
+    h.controller.disarm('user-stop')
+    h.clock.advance(250)
+
+    // The whole configured set, not the empty set state reported, because a
+    // key-down one IPC hop away is exactly what this has to cover.
+    expect(fallback).toHaveBeenCalledWith(['key-w'], ['left'])
     expect(h.releases[0]?.confirmed).toBe(true)
-    expect(h.releases[0]?.keyIds).toEqual([])
+    expect(h.journal.present).toBe(false)
+  })
+
+  it('does not treat a soft release as proof that a later teardown has nothing to release', () => {
+    // The stuck-key hole. Fire, lose focus (which used to wipe the record of
+    // what had been held), then tear down while the injector is unresponsive.
+    const h = setup()
+    armAndFire(h)
+    h.injector().loseFocus()
+    expect(h.controller.isArmed).toBe(true)
+
+    h.injector().wedged = true
+    h.controller.disarm('user-stop')
+
+    expect(h.injector().killed).toBe(false)
+    h.clock.advance(250)
+
+    expect(h.releases[h.releases.length - 1]?.confirmed).toBe(false)
+    expect(h.journal.present).toBe(true)
+  })
+
+  it('replays the configured set through the fallback after a soft release', () => {
+    const fallback = vi.fn(() => 2)
+    const h = setup({ releaseFallback: fallback })
+    armAndFire(h)
+    h.injector().loseFocus()
+
+    h.injector().wedged = true
+    h.controller.disarm('user-stop')
+    h.clock.advance(250)
+
+    expect(fallback).toHaveBeenCalledWith(['key-w'], ['left'])
     expect(h.journal.present).toBe(false)
   })
 })
@@ -825,6 +904,39 @@ describe('injector faults', () => {
     expect(state.phase).toBe('blocked')
     expect(state.message).toContain('running as administrator')
     expect(h.releases.map((event) => event.reason)).toEqual(['injector-error'])
+  })
+
+  it('blocks with the app name when Windows refuses the injection into an elevated target', () => {
+    const h = setup()
+    armAndFire(h)
+
+    h.injector().emit({
+      t: 'blocked',
+      code: 'elevated-target',
+      message: 'SetForegroundWindow denied by UIPI',
+      appName: 'Escape from Tarkov',
+    })
+
+    const state = h.controller.getState()
+    expect(state.phase).toBe('blocked')
+    expect(state.message).toContain('Escape from Tarkov')
+    expect(state.message).toContain('running as administrator')
+    expect(state.message).toContain('Restart KeyPress Ultimate as administrator')
+    // A blocked session is over: the keys come back and nothing stays armed.
+    expect(h.controller.isArmed).toBe(false)
+    expect(state.firingKeyIds).toEqual([])
+    expect(h.releases).toHaveLength(1)
+    expect(h.journal.present).toBe(false)
+  })
+
+  it('still says something useful when the elevated target has no name', () => {
+    const h = setup()
+    armAndFire(h)
+
+    h.injector().emit({ t: 'blocked', code: 'elevated-target', message: '', appName: '' })
+
+    expect(h.controller.getState().phase).toBe('blocked')
+    expect(h.controller.getState().message).toContain('running as administrator')
   })
 
   it('blocks when the permission is denied inside the injector', () => {
@@ -930,6 +1042,93 @@ describe('maxSessionMinutes', () => {
     h.clock.advance(1_001)
     expect(h.controller.isArmed).toBe(false)
   })
+
+  it('clamps a cap past the 32-bit timer ceiling instead of firing immediately', () => {
+    // A hand-edited settings file can carry any number. 100000 minutes is 6e9
+    // ms, and a real setTimeout stores its delay in a signed 32-bit int: it
+    // warns, rounds the delay down to 1ms, and ends the session a tick after
+    // Start. The fake clock has no such ceiling, so this asserts on the delay
+    // the controller asks for rather than on when it fires.
+    const base = new FakeClock()
+    const delays: number[] = []
+    const clock: Clock = {
+      now: () => base.now(),
+      setTimeout: (fn, ms) => {
+        delays.push(ms)
+        return base.setTimeout(fn, ms)
+      },
+      clearTimeout: (handle) => base.clearTimeout(handle),
+      setInterval: (fn, ms) => base.setInterval(fn, ms),
+      clearInterval: (handle) => base.clearInterval(handle),
+    }
+    const h = setup({ clock, settings: { ...SETTINGS, maxSessionMinutes: 100_000 } })
+
+    h.controller.arm(CONFIG)
+
+    // The cap is the only timeout arm schedules; the watchdogs are intervals.
+    expect(delays).toHaveLength(1)
+    expect(delays[0]).toBeLessThanOrEqual(2_147_483_647)
+    expect(delays[0]).toBeGreaterThan(60_000)
+
+    base.advance(60 * 60_000)
+    expect(h.controller.isArmed).toBe(true)
+    expect(h.releases).toHaveLength(0)
+  })
+
+  it('honours a cap raised mid-session instead of stopping at the old deadline', () => {
+    const h = setup({ settings: { ...SETTINGS, maxSessionMinutes: 5 } })
+    armAndFire(h)
+    h.clock.advance(4 * 60_000)
+
+    h.controller.setSettings({ ...SETTINGS, maxSessionMinutes: 60 })
+
+    // The old five-minute deadline must not fire the session the user just
+    // extended.
+    h.clock.advance(2 * 60_000)
+    expect(h.controller.isArmed).toBe(true)
+
+    h.clock.advance(54 * 60_000)
+    expect(h.controller.isArmed).toBe(false)
+    expect(h.releases.map((event) => event.reason)).toEqual(['max-session-time'])
+  })
+
+  it('honours a cap lowered mid-session, measured from when the session started', () => {
+    const h = setup({ settings: { ...SETTINGS, maxSessionMinutes: 30 } })
+    armAndFire(h)
+    h.clock.advance(60_000)
+
+    h.controller.setSettings({ ...SETTINGS, maxSessionMinutes: 5 })
+
+    h.clock.advance(3 * 60_000 + 59_000)
+    expect(h.controller.isArmed).toBe(true)
+    h.clock.advance(2_000)
+    expect(h.controller.isArmed).toBe(false)
+    expect(h.controller.getState().message).toContain('5 minute session limit')
+  })
+
+  it('releases on the next turn of the loop when the new cap is already past', () => {
+    const h = setup({ settings: { ...SETTINGS, maxSessionMinutes: 30 } })
+    armAndFire(h)
+    h.clock.advance(10 * 60_000)
+
+    h.controller.setSettings({ ...SETTINGS, maxSessionMinutes: 5 })
+    // Not synchronously: setSettings runs inside an IPC handler.
+    expect(h.controller.isArmed).toBe(true)
+
+    h.clock.advance(0)
+    expect(h.controller.isArmed).toBe(false)
+    expect(h.releases.map((event) => event.reason)).toEqual(['max-session-time'])
+  })
+
+  it('drops the cap entirely when it is set to unlimited mid-session', () => {
+    const h = setup({ settings: { ...SETTINGS, maxSessionMinutes: 5 } })
+    armAndFire(h)
+
+    h.controller.setSettings({ ...SETTINGS, maxSessionMinutes: 0 })
+
+    h.clock.advance(4 * 60 * 60_000)
+    expect(h.controller.isArmed).toBe(true)
+  })
 })
 
 describe('heartbeat', () => {
@@ -956,6 +1155,26 @@ describe('settings', () => {
     const forwarded = h.injector().posted.filter((message) => message.t === 'settings')
     expect(forwarded).toHaveLength(2)
     expect(forwarded[1]).toEqual({ t: 'settings', settings: next })
+  })
+
+  it('leaves the running cap alone when the change does not touch it', () => {
+    const h = setup({ settings: { ...SETTINGS, maxSessionMinutes: 5 } })
+    armAndFire(h)
+    h.clock.advance(4 * 60_000)
+
+    h.controller.setSettings({ ...SETTINGS, maxSessionMinutes: 5, windowsUseVirtualKeys: true })
+
+    h.clock.advance(60_001)
+    expect(h.controller.isArmed).toBe(false)
+    expect(h.releases.map((event) => event.reason)).toEqual(['max-session-time'])
+  })
+
+  it('does not schedule a cap for a session that is not running', () => {
+    const h = setup()
+
+    h.controller.setSettings({ ...SETTINGS, maxSessionMinutes: 1 })
+
+    expect(h.clock.pendingTimers).toBe(0)
   })
 })
 

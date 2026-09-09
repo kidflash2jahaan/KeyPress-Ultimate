@@ -6,6 +6,7 @@ import type { Preset, Settings } from '../shared/types'
 import {
   DEFAULT_SETTINGS,
   PRESETS_SCHEMA_VERSION,
+  SESSION_MINUTES_BOUNDS,
   SETTINGS_SCHEMA_VERSION,
   createStore,
 } from './store'
@@ -110,6 +111,58 @@ describe('settings', () => {
     expect(settings.autoCheckUpdates).toBe(true)
     // The one field that was actually valid survives.
     expect(settings.windowsUseVirtualKeys).toBe(true)
+  })
+
+  it('clamps a hand-edited session cap to a day, so the timer cannot overflow', () => {
+    // 100000 minutes is 6e9 ms, past the signed 32-bit ceiling setTimeout
+    // stores. Left unclamped it is silently rounded down to 1ms and every
+    // session ends the instant it starts.
+    writeFileSync(
+      join(dir, 'settings.json'),
+      JSON.stringify({
+        schemaVersion: SETTINGS_SCHEMA_VERSION,
+        data: { ...DEFAULT_SETTINGS, maxSessionMinutes: 100_000 },
+      }),
+    )
+    const store = createStore({ userDataDir: dir })
+
+    const minutes = store.loadSettings().maxSessionMinutes
+    expect(minutes).toBe(SESSION_MINUTES_BOUNDS.max)
+    expect(minutes * 60_000).toBeLessThan(2_147_483_647)
+  })
+
+  it('clamps on save as well as on load, so a bad value cannot be persisted', () => {
+    const store = createStore({ userDataDir: dir })
+
+    const written = store.saveSettings({ ...DEFAULT_SETTINGS, maxSessionMinutes: 10 ** 12 })
+
+    expect(written.maxSessionMinutes).toBe(SESSION_MINUTES_BOUNDS.max)
+    expect(createStore({ userDataDir: dir }).loadSettings().maxSessionMinutes).toBe(
+      SESSION_MINUTES_BOUNDS.max,
+    )
+  })
+
+  it('keeps every in-range session cap, including the unlimited 0 and the bound itself', () => {
+    const store = createStore({ userDataDir: dir })
+
+    expect(store.saveSettings({ ...DEFAULT_SETTINGS, maxSessionMinutes: 0 }).maxSessionMinutes).toBe(
+      0,
+    )
+    expect(
+      store.saveSettings({ ...DEFAULT_SETTINGS, maxSessionMinutes: SESSION_MINUTES_BOUNDS.max })
+        .maxSessionMinutes,
+    ).toBe(SESSION_MINUTES_BOUNDS.max)
+    expect(
+      store.saveSettings({ ...DEFAULT_SETTINGS, maxSessionMinutes: 45.9 }).maxSessionMinutes,
+    ).toBe(45)
+  })
+
+  it('falls back to the default for a negative cap rather than clamping it to unlimited', () => {
+    const store = createStore({ userDataDir: dir })
+
+    expect(
+      store.saveSettings({ ...DEFAULT_SETTINGS, maxSessionMinutes: -5 }).maxSessionMinutes,
+    ).toBe(DEFAULT_SETTINGS.maxSessionMinutes)
   })
 
   it('leaves no temp files behind, so a crash mid-write cannot half-write the real file', () => {

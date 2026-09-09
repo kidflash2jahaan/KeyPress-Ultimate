@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type JSX } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type JSX } from 'react'
 import { getAppStore, useActions, useAppStore } from '../state/store'
 import styles from './PresetMenu.module.css'
 
@@ -71,24 +71,44 @@ export function PresetMenu(): JSX.Element {
   const [newName, setNewName] = useState('')
 
   const rootRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  /** The row whose rename just ended, so focus can go back to its control. */
+  const restoreRowFocus = useRef<string | null>(null)
   const menuId = useId()
   const newNameId = useId()
 
   const active = presets.find((preset) => preset.id === activePresetId) ?? null
+
+  /**
+   * Every way out of this menu, in one place.
+   *
+   * Closing unmounts whatever holds focus, so without this focus lands on
+   * <body>: no visible ring, and the next Tab restarts from the skip link at
+   * the very top of the app. Focus goes back to the trigger, which is where it
+   * came from and where the user still is.
+   *
+   * The exception is an outside click, which has already put focus where the
+   * user pointed; only take it back if the menu still holds it.
+   */
+  const close = useCallback((): void => {
+    const root = rootRef.current
+    const active2 = document.activeElement
+    const heldFocus = root !== null && active2 instanceof Node && root.contains(active2)
+    setOpen(false)
+    setRenamingId(null)
+    if (heldFocus) triggerRef.current?.focus()
+  }, [])
 
   useEffect(() => {
     if (!open) return
     function onPointerDown(event: PointerEvent): void {
       const root = rootRef.current
       if (root !== null && event.target instanceof Node && !root.contains(event.target)) {
-        setOpen(false)
+        close()
       }
     }
     function onKeyDown(event: KeyboardEvent): void {
-      if (event.key === 'Escape') {
-        setOpen(false)
-        setRenamingId(null)
-      }
+      if (event.key === 'Escape') close()
     }
     document.addEventListener('pointerdown', onPointerDown)
     document.addEventListener('keydown', onKeyDown)
@@ -96,7 +116,16 @@ export function PresetMenu(): JSX.Element {
       document.removeEventListener('pointerdown', onPointerDown)
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [open])
+  }, [open, close])
+
+  // Leaving rename mode unmounts the text field too, so the row it belonged to
+  // takes focus back rather than dropping it on the floor.
+  useEffect(() => {
+    const id = restoreRowFocus.current
+    if (id === null) return
+    restoreRowFocus.current = null
+    rootRef.current?.querySelector<HTMLElement>(`[data-rename-for="${id}"]`)?.focus()
+  })
 
   function beginRename(id: string, current: string): void {
     setRenamingId(id)
@@ -106,6 +135,7 @@ export function PresetMenu(): JSX.Element {
   async function commitRename(): Promise<void> {
     if (renamingId === null) return
     await actions.renamePreset(renamingId, draftName)
+    restoreRowFocus.current = renamingId
     setRenamingId(null)
   }
 
@@ -116,7 +146,7 @@ export function PresetMenu(): JSX.Element {
     // the field, the typed name and the menu exactly where the user left them.
     if (getAppStore().getState().presets.length > before) {
       setNewName('')
-      setOpen(false)
+      close()
     }
   }
 
@@ -125,6 +155,7 @@ export function PresetMenu(): JSX.Element {
       <button
         type="button"
         className={styles.trigger}
+        ref={triggerRef}
         aria-expanded={open}
         aria-haspopup="menu"
         aria-controls={open ? menuId : undefined}
@@ -178,7 +209,7 @@ export function PresetMenu(): JSX.Element {
                         className={styles.pick}
                         onClick={() => {
                           actions.applyPreset(preset.id)
-                          setOpen(false)
+                          close()
                         }}
                       >
                         <span className={styles.tick}>
@@ -190,6 +221,7 @@ export function PresetMenu(): JSX.Element {
                       <button
                         type="button"
                         className={styles.rowAction}
+                        data-rename-for={preset.id}
                         aria-label={`Rename ${preset.name}`}
                         onClick={() => beginRename(preset.id, preset.name)}
                       >

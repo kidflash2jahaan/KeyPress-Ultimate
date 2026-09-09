@@ -448,6 +448,13 @@ export interface IpcHandlerDeps {
     set(patch: Partial<Settings>): Settings
   }
 
+  /**
+   * These four are the channels whose rejections are forwarded to the renderer
+   * rather than swallowed. `check()` resolving to `null` means "checked, and
+   * nothing is newer"; it must never be used to paper over a check that could
+   * not run, and `download()` / `install()` must reject rather than resolve on
+   * a refusal, or the UI has no way to stop saying "Downloading…".
+   */
   updates: {
     check(): Promise<UpdateInfo | null>
     download(): Promise<void>
@@ -504,6 +511,32 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): () => void {
     } catch (error) {
       onError(label, error)
       return fallback
+    }
+  }
+
+  /**
+   * The updater's exception to `safely`.
+   *
+   * `safely` is right for a channel whose failure the user cannot act on:
+   * minimising a window that is already gone should not become a dialog. It is
+   * wrong for the update channels, because their entire job is to report an
+   * outcome. The updater deliberately rejects with sentences written for the
+   * user ("GitHub's release API is rate limited right now…", "No SHA-256 was
+   * published for …, so it cannot be verified"), and swallowing them here turns
+   * a refusal into a resolved `undefined`: the renderer then shows a check that
+   * "found nothing" or a download that never finishes, which is a lie about an
+   * app that replaces its own binary.
+   *
+   * So: log it for the main-process log, then let it cross the boundary.
+   * `ipcMain.handle` forwards a rejection to the renderer's `invoke`, which is
+   * the only channel the UI has for hearing "this failed".
+   */
+  async function surfacing<T>(label: string, run: () => Promise<T> | T): Promise<T> {
+    try {
+      return await run()
+    } catch (error) {
+      onError(label, error)
+      throw error instanceof Error ? error : new Error(String(error))
     }
   }
 
@@ -573,15 +606,15 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): () => void {
     return safely('settings:set', () => deps.settings.set(parsed.value), current)
   })
 
-  handle(IPC_INVOKE.updatesCheck, async () =>
-    safely('updates:check', () => deps.updates.check(), null),
-  )
+  // `null` from these channels means "checked, and you are already current".
+  // A check that could not run rejects instead, so the two are never confused.
+  handle(IPC_INVOKE.updatesCheck, async () => surfacing('updates:check', () => deps.updates.check()))
   handle(IPC_INVOKE.updatesDownload, async () => {
-    await safely('updates:download', () => deps.updates.download(), undefined)
+    await surfacing('updates:download', () => deps.updates.download())
     return undefined
   })
   handle(IPC_INVOKE.updatesInstall, async () => {
-    await safely('updates:install', () => deps.updates.install(), undefined)
+    await surfacing('updates:install', () => deps.updates.install())
     return undefined
   })
   handle(IPC_INVOKE.updatesOpenReleasesPage, async () => {

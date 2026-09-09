@@ -37,6 +37,18 @@ export const DEFAULT_SETTINGS: Settings = {
   windowsUseVirtualKeys: false,
 }
 
+/**
+ * The session cap, in minutes, as it may be persisted. 0 means unlimited.
+ *
+ * The upper bound is not cosmetic. The value is multiplied by 60000 and handed
+ * to `setTimeout`, which stores a delay in a signed 32-bit int: anything past
+ * about 35791 minutes overflows, is clamped to 1ms, and makes every session end
+ * the instant it starts. The IPC layer already clamps writes from the renderer,
+ * so this file is the only way an out-of-range value can reach the controller,
+ * which is exactly why it has to clamp too.
+ */
+export const SESSION_MINUTES_BOUNDS = { min: 0, max: 24 * 60 } as const
+
 /** Timing bounds. Tap is 10-1000ms per the spec; the rest just stay sane. */
 const REPEAT_INITIAL_BOUNDS = { min: 1, max: 10_000, fallback: 400 } as const
 const REPEAT_INTERVAL_BOUNDS = { min: 1, max: 1_000, fallback: 33 } as const
@@ -141,6 +153,18 @@ function clampInt(
   return Math.min(bounds.max, Math.max(bounds.min, Math.round(value)))
 }
 
+/**
+ * Not `clampInt`: a negative or non-numeric cap falls back to the default
+ * rather than clamping to 0, because 0 means "unlimited" and quietly turning a
+ * damaged value into "hold forever" is the wrong direction for this app.
+ */
+function sanitizeMaxSessionMinutes(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return DEFAULT_SETTINGS.maxSessionMinutes
+  }
+  return Math.min(SESSION_MINUTES_BOUNDS.max, Math.max(SESSION_MINUTES_BOUNDS.min, Math.floor(value)))
+}
+
 export function sanitizeSettings(raw: unknown): Settings {
   if (!isRecord(raw)) return { ...DEFAULT_SETTINGS }
 
@@ -155,12 +179,7 @@ export function sanitizeSettings(raw: unknown): Settings {
       ? (theme as Settings['theme'])
       : DEFAULT_SETTINGS.theme,
     panicHotkey: panicHotkey ?? DEFAULT_SETTINGS.panicHotkey,
-    maxSessionMinutes:
-      typeof maxSessionMinutes === 'number' &&
-      Number.isFinite(maxSessionMinutes) &&
-      maxSessionMinutes >= 0
-        ? Math.floor(maxSessionMinutes)
-        : DEFAULT_SETTINGS.maxSessionMinutes,
+    maxSessionMinutes: sanitizeMaxSessionMinutes(maxSessionMinutes),
     autoCheckUpdates:
       typeof autoCheckUpdates === 'boolean' ? autoCheckUpdates : DEFAULT_SETTINGS.autoCheckUpdates,
     windowsUseVirtualKeys:

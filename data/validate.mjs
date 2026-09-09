@@ -94,6 +94,44 @@ for (const k of keys) {
 }
 check(tripleDups.length === 0, `every (winVirtualKey, winExtended, winScanCode) triple is unique${tripleDups.length ? ' -> ' + tripleDups.join('; ') : ''}`);
 
+// ---------------------------------------------------------------------------
+// Scan-code INJECTION identity.
+//
+// winScanCode + winExtended describe what goes into SendInput, not what Windows
+// reports in a WM_KEYDOWN lParam. With KEYEVENTF_SCANCODE the wVk field is ignored
+// entirely, so the (winScanCode, winExtended) pair IS the key as far as the target
+// app is concerned. Two keys sharing that pair means one of them injects as the
+// other. See PAUSE_NUMLOCK_NOTE in data/generate.mjs.
+//
+// Keys with winScanCode null are excluded: they have no scancode identity and
+// encodeKey() sends them by virtual key instead.
+const seenScan = new Map(); const scanDups = [];
+for (const k of keys) {
+  if (k.winScanCode === null) continue;
+  if (k.winVirtualKey === null) continue; // not injectable on Windows at all
+  const pair = `0x${k.winScanCode.toString(16).padStart(2, '0')}|${k.winExtended ? 'E0' : 'bare'}`;
+  if (seenScan.has(pair)) scanDups.push(`${seenScan.get(pair)} vs ${k.id} (${pair})`);
+  else seenScan.set(pair, k.id);
+}
+check(scanDups.length === 0,
+  `every (winScanCode, winExtended) pair is unique, so no key injects as another${scanDups.length ? ' -> ' + scanDups.join('; ') : ''}`);
+
+// The Pause / Num Lock pair, pinned by hand because getting it backwards is silent
+// and user-visible: a bare Set-1 scan code 0x45 is VK_NUMLOCK, so a Pause injected
+// as 0x45 toggles the user's Num Lock instead (roughly ten times a second in tap
+// mode). Chromium's dom_code_data.inc records the values Windows REPORTS
+// (Pause 0x0045, NumLock 0xE045); these are the values SendInput ACCEPTS.
+const find = (id) => keys.find(k => k.id === id) ?? {};
+const pause = find('key-pause'), numLock = find('numpad-num-lock');
+check(pause.winScanCode === null,
+  `key-pause has winScanCode null so encodeKey takes the virtual-key path (bare 0x45 would be Num Lock, got ${pause.winScanCode})`);
+check(pause.winVirtualKey === 0x13,
+  `key-pause carries VK_PAUSE 0x13, the only form of Pause SendInput can express (got ${pause.winVirtualKey})`);
+check(numLock.winScanCode === 0x45 && numLock.winExtended === false,
+  `numpad-num-lock injects as bare scan 0x45 with no extended flag; 0xE0 0x45 has no entry in the E0 table and would do nothing (got 0x${(numLock.winScanCode ?? 0).toString(16)} / extended=${numLock.winExtended})`);
+check(numLock.winVirtualKey === 0x90,
+  `numpad-num-lock carries VK_NUMLOCK 0x90 (got ${numLock.winVirtualKey})`);
+
 // base ANSI-104 must be exactly 104 keys
 const base = keys.filter(k => !k.extra);
 check(base.length === 104, `base (non-extra) set is exactly 104 keys (got ${base.length})`);
@@ -162,7 +200,10 @@ const mustBeExt = ['key-insert','key-home','key-page-up','key-delete','key-end',
   'key-left-meta','key-right-meta','key-menu','numpad-divide','numpad-enter'];
 const extBad = mustBeExt.filter(id => byId[id].winExtended !== true);
 check(extBad.length === 0, `all E0-prefixed keys have winExtended=true${extBad.length ? ' -> ' + extBad.join(', ') : ''}`);
-const mustNotBeExt = ['key-right-shift','numpad-multiply','numpad-add','numpad-subtract','key-a','numpad-0'];
+// numpad-num-lock is in this list on purpose: Windows REPORTS it as 0xE045 (kbdus
+// tags ausVK[0x45] with KBDEXT), but the E0 scan-code table has no 0x45 entry, so
+// injecting it extended resolves to no virtual key. See PAUSE_NUMLOCK_NOTE.
+const mustNotBeExt = ['key-right-shift','numpad-multiply','numpad-add','numpad-subtract','key-a','numpad-0','numpad-num-lock'];
 const extBad2 = mustNotBeExt.filter(id => byId[id].winExtended !== false);
 check(extBad2.length === 0, `non-extended keys have winExtended=false${extBad2.length ? ' -> ' + extBad2.join(', ') : ''}`);
 

@@ -9,6 +9,31 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const INC = path.join(here, 'dom_code_data.inc');
 
+// PAUSE_NUMLOCK_NOTE
+// ------------------
+// winScanCode + winExtended describe what we FEED to SendInput, not what Windows
+// reports back in a WM_KEYDOWN lParam. For every key but two the distinction does
+// not matter, because the driver echoes what the hardware sent. Pause and Num Lock
+// are the exception, and getting them backwards is a wrong-key bug:
+//
+//   * Num Lock. The hardware sends a bare Set-1 scan code 0x45. kbdus.dll's
+//     ausVK[0x45] is VK_NUMLOCK | KBDEXT, so the KBDEXT bit makes Windows REPORT
+//     the key with the extended flag set, which is why Chromium's dom_code_data.inc
+//     records 0xE045. Injection has to go the other way: send 0x45 with no
+//     KEYEVENTF_EXTENDEDKEY. Sending 0xE0 0x45 hits aE0VscToVk, which has entries
+//     for 0x1C, 0x1D, 0x35, 0x37, 0x38, 0x46-0x53, 0x5B-0x5D and the media keys but
+//     nothing at 0x45, so it resolves to no virtual key and does nothing at all.
+//
+//   * Pause. The hardware sends E1 1D 45. KEYEVENTF_EXTENDEDKEY only expresses the
+//     E0 prefix, so no single INPUT record can carry it, and Chromium records the
+//     bare 0x0045 that Windows reports. Injecting bare 0x45 is NOT Pause: it is
+//     Num Lock, per the row above. So Pause carries winScanCode: null and is sent
+//     by virtual key (VK_PAUSE 0x13) instead. That is the one thing SendInput can
+//     actually express for this key.
+//
+// Both overrides are pinned by data/validate.mjs so a regeneration cannot silently
+// swap them back to the Chromium values.
+
 // ---- parse the authoritative table -------------------------------------
 const table = new Map(); // DomCode string -> {win, mac}
 for (const line of fs.readFileSync(INC, 'utf8').split('\n')) {
@@ -164,9 +189,14 @@ K({ id: 'key-print-screen', label: 'PrtSc', winLabel: 'Print Screen', section: '
 K({ id: 'key-scroll-lock', label: 'ScrLk', winLabel: 'Scroll Lock', section: 'navigation', row: 0,
     domCode: 'ScrollLock', winVirtualKey: VK.SCROLL, platformExclusive: 'win', holdable: false,
     notes: 'No macOS keycode. On Apple Extended layouts this physical position is F14. Lock key: not meaningful to hold.' });
+// See PAUSE_NUMLOCK_NOTE at the top of this file. Chromium's table gives Pause
+// win=0x0045 and NumLock win=0xE045, which is what Windows REPORTS in lParam, not
+// what SendInput ACCEPTS. These two entries deliberately override the derived
+// values so the data describes injection. data/validate.mjs pins both.
 K({ id: 'key-pause', label: 'Pause', subLabel: 'Break', winLabel: 'Pause', section: 'navigation', row: 0,
     domCode: 'Pause', winVirtualKey: VK.PAUSE, platformExclusive: 'win',
-    notes: 'No macOS keycode. On Apple Extended layouts this physical position is F15. Real hardware sends the E1 1D 45 prefixed sequence which SendInput cannot express; use VK-based injection.' });
+    winScanCode: null, winExtended: false,
+    notes: 'No macOS keycode. On Apple Extended layouts this physical position is F15. Windows: the physical key emits the three-code sequence E1 1D 45, which one SendInput INPUT record cannot express, and a bare scan code 0x45 is VK_NUMLOCK in the kbdus scan-code table, so injecting it would toggle the user Num Lock instead of sending Pause. winScanCode is therefore null: encodeKey falls through to the virtual-key path and sends VK_PAUSE (0x13) directly, which is what this key has always needed. See docs/windows-testing-checklist.md R-04.' });
 K({ id: 'key-insert', label: 'Insert', macLabel: 'Help', winLabel: 'Insert', section: 'navigation', row: 1,
     domCode: 'Insert', winVirtualKey: VK.INSERT,
     notes: 'macOS has no Insert. This physical position is Help on the Apple Extended Keyboard; kVK_Help = 0x72 is the correct Mac keycode.' });
@@ -186,9 +216,12 @@ K({ id: 'key-fn', label: 'fn', macLabel: 'fn', section: 'navigation', row: 5, ex
     notes: 'kVK_Function = 0x3F from HIToolbox/Events.h. The fn key is handled below the CGEvent layer on Apple hardware and is very likely NOT injectable via CGEventPost - needs supervised human test before exposing in the UI.' });
 
 // ===== NUMPAD ==========================================================
+// See PAUSE_NUMLOCK_NOTE. winExtended is overridden to false: Chromium's 0xE045
+// is the value Windows REPORTS, not one SendInput accepts.
 K({ id: 'numpad-num-lock', label: 'Num Lock', macLabel: 'Clear', winLabel: 'Num Lock', section: 'numpad', row: 0,
     domCode: 'NumLock', winVirtualKey: VK.NUMLOCK, holdable: false,
-    notes: 'Same physical position as Clear on Apple numpads; kVK_ANSI_KeypadClear = 0x47. Windows scancode 0x45 collides with Pause; the extended flag is what disambiguates NumLock from Pause when injecting scancodes. Lock key: not meaningful to hold.' });
+    winExtended: false,
+    notes: 'Same physical position as Clear on Apple numpads; kVK_ANSI_KeypadClear = 0x47. Windows: inject the BARE scan code 0x45 with no extended flag. kbdus maps ausVK[0x45] to VK_NUMLOCK | KBDEXT, so the driver sets the extended bit itself and lParam comes back as 0xE045; that reported value is what Chromium dom_code_data.inc records, and feeding it back into SendInput is wrong because the E0 scan-code table has no 0x45 entry and it would resolve to no virtual key at all. winExtended describes injection, not what Windows reports. Lock key: not meaningful to hold.' });
 K({ id: 'numpad-divide', label: '/', section: 'numpad', row: 0, domCode: 'NumpadDivide', winVirtualKey: VK.DIVIDE });
 K({ id: 'numpad-multiply', label: '*', section: 'numpad', row: 0, domCode: 'NumpadMultiply', winVirtualKey: VK.MULTIPLY });
 K({ id: 'numpad-subtract', label: '-', section: 'numpad', row: 0, domCode: 'NumpadSubtract', winVirtualKey: VK.SUBTRACT });
@@ -268,6 +301,30 @@ const mouse = [
     holdable: false, repeatIntervalMsDefault: 50,
     notes: 'See the wheel-up entry. mouseData is a signed value: -120 for one detent toward the user. macOS uses delta -1.' },
 ];
+
+// ---- refuse to emit a file with the Pause / Num Lock pair swapped -------
+// A cheap tripwire at the point of generation. data/validate.mjs asserts the same
+// thing against the written file, plus the general "no two scancode-injectable keys
+// share a (winScanCode, winExtended) pair" rule. See PAUSE_NUMLOCK_NOTE.
+{
+  const by = Object.fromEntries(keys.map(k => [k.id, k]));
+  const pause = by['key-pause'];
+  const numLock = by['numpad-num-lock'];
+  const problems = [];
+  if (pause.winScanCode !== null) {
+    problems.push(`key-pause.winScanCode must be null (bare 0x45 is VK_NUMLOCK, not Pause); got ${pause.winScanCode}`);
+  }
+  if (pause.winVirtualKey !== VK.PAUSE) {
+    problems.push(`key-pause.winVirtualKey must be VK_PAUSE 0x13; got ${pause.winVirtualKey}`);
+  }
+  if (numLock.winScanCode !== 0x45 || numLock.winExtended !== false) {
+    problems.push(`numpad-num-lock must be scan 0x45 with winExtended false; got ${numLock.winScanCode} / ${numLock.winExtended}`);
+  }
+  if (problems.length) {
+    console.error('REFUSING to write keys.json:\n  ' + problems.join('\n  '));
+    process.exit(1);
+  }
+}
 
 fs.writeFileSync(path.join(here, 'keys.json'), JSON.stringify(keys, null, 2) + '\n');
 fs.writeFileSync(path.join(here, 'mouse.json'), JSON.stringify(mouse, null, 2) + '\n');

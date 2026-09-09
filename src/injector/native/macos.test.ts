@@ -52,6 +52,7 @@ function button(id: string): MouseDef {
 const W = key('key-w')
 const A = key('key-a')
 const LEFT_SHIFT = key('key-left-shift')
+const RIGHT_SHIFT = key('key-right-shift')
 const SCROLL_LOCK = key('key-scroll-lock') // macKeyCode === null on macOS
 const LMB = button('left')
 const MMB = button('middle')
@@ -98,11 +99,17 @@ describeMac('MacNativeInput (dry run, nothing is posted)', () => {
   // -- non-negotiable 3: tap location ---------------------------------------
 
   it('posts every event to kCGHIDEventTap', () => {
+    // `tap` is the argument the posting path was actually handed, not a
+    // constant the dry run restates: `#emit` chooses the tap and `#post` both
+    // reports it and passes it to CGEventPost, so a post routed to the session
+    // tap (1) fails here. A session-tap post does not update the global key
+    // state games read through the HID layer, which is the whole product.
     mac.keyDown(W)
     mac.keyDown(LEFT_SHIFT)
     mac.mouseDown(LMB)
+    mac.keyUpToPid(W, 4242) // the pid-targeted path chooses a tap too
     mac.releaseAll()
-    expect(events).not.toHaveLength(0)
+    expect(events.length).toBeGreaterThan(4)
     for (const event of events) expect(event.tap).toBe(HID_EVENT_TAP)
   })
 
@@ -171,6 +178,84 @@ describeMac('MacNativeInput (dry run, nothing is posted)', () => {
     mac.keyUp(LEFT_SHIFT)
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({ type: FLAGS_CHANGED, flags: 0 })
+  })
+
+  // -- releasing what this instance never pressed ---------------------------
+  //
+  // The main process owns its own adapter and has never pressed anything on
+  // it: the injector process did the pressing. Both of main's last-resort
+  // release paths, the crash-journal replay at startup and the fallback used
+  // when the injector dies, call keyUp/mouseUp on that fresh instance. An
+  // adapter that released only what it personally pressed would post nothing,
+  // let main report a released count, and let the journal that was the last
+  // record of the stuck key be deleted. Every test below runs on the `mac`
+  // built in beforeEach, which has pressed nothing at all.
+
+  it('posts a key-up for a key it never pressed', () => {
+    expect(mac.getHeld()).toEqual({ keyIds: [], buttonIds: [], flags: 0 })
+
+    mac.keyUp(W)
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: KEY_UP, keyCode: W.macKeyCode, flags: 0, toPid: null })
+  })
+
+  it('posts a mouse-up for a button it never pressed', () => {
+    mac.mouseUp(LMB)
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: LEFT_MOUSE_UP, clickState: 1 })
+  })
+
+  it('posts a modifier it never pressed as FlagsChanged, not key-up', () => {
+    mac.keyUp(LEFT_SHIFT)
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      type: FLAGS_CHANGED,
+      keyCode: LEFT_SHIFT.macKeyCode,
+      flags: 0,
+    })
+  })
+
+  it('replays a whole journal plan on an adapter that pressed none of it', () => {
+    // Exactly what `releaseDirectly` does with a recovered journal.
+    mac.mouseUp(LMB)
+    mac.keyUp(W)
+    mac.keyUp(LEFT_SHIFT)
+
+    expect(events.map((event) => event.type)).toEqual([LEFT_MOUSE_UP, KEY_UP, FLAGS_CHANGED])
+  })
+
+  it('does not disturb a genuinely held modifier when releasing one it is not holding', () => {
+    mac.keyDown(LEFT_SHIFT)
+    events.length = 0
+
+    mac.keyUp(RIGHT_SHIFT)
+
+    // Left shift is still down, so the shift mask must survive: the mask is not
+    // per-key, and clearing right shift's bits out of it would tell every app
+    // that shift came up while it is still being held.
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      type: FLAGS_CHANGED,
+      keyCode: RIGHT_SHIFT.macKeyCode,
+      flags: MASK_SHIFT | DEVICE_LEFT_SHIFT,
+    })
+    expect(mac.getHeld().keyIds).toEqual([LEFT_SHIFT.id])
+  })
+
+  it('leaves the held set untouched by a release for something it is not holding', () => {
+    mac.keyDown(W)
+    mac.keyUp(A)
+    mac.mouseUp(LMB)
+    expect(mac.getHeld()).toEqual({ keyIds: [W.id], buttonIds: [], flags: 0 })
+
+    events.length = 0
+    mac.releaseAll()
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: KEY_UP, keyCode: W.macKeyCode })
   })
 
   it('reports held state exactly', () => {

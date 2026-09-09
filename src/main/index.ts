@@ -32,6 +32,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   globalShortcut,
   ipcMain,
   nativeTheme,
@@ -41,7 +42,6 @@ import {
   systemPreferences,
 } from 'electron'
 import { IPC_EVENT, type DisarmReason, type IpcEventChannel } from '@shared/ipc'
-import { getKeyById, getMouseButtonById } from '@shared/keys'
 import type {
   AppInfo,
   Platform,
@@ -57,6 +57,7 @@ import { createFocusWatcher } from './focus-watcher'
 import { createIconCache } from './icons'
 import { HoldJournal, recoverStaleJournal, type ReplayPlan } from './journal'
 import { ACCESSIBILITY_SETTINGS_URL, createPermissions } from './permissions'
+import { releaseInputDirectly } from './release-directly'
 import {
   SessionController,
   type PowerEventName,
@@ -174,25 +175,12 @@ async function bootstrap(): Promise<void> {
    * Post key-ups and button-ups for a set of ids, straight from main. Used by
    * the crash-journal replay at startup and as the session controller's
    * last-resort release when the injector dies without confirming.
+   *
+   * The rules it obeys, and why a normal return here is treated as proof the
+   * keys are up, live in `./release-directly.ts`.
    */
   function releaseDirectly(keyIds: readonly string[], buttonIds: readonly string[]): number {
-    if (nativeInput === null) {
-      throw new Error('the native input layer is not bound, so nothing can be released')
-    }
-    let released = 0
-    for (const buttonId of buttonIds) {
-      const button = getMouseButtonById(buttonId)
-      if (button === undefined) continue
-      nativeInput.mouseUp(button)
-      released += 1
-    }
-    for (const keyId of keyIds) {
-      const key = getKeyById(keyId)
-      if (key === undefined) continue
-      nativeInput.keyUp(key)
-      released += 1
-    }
-    return released
+    return releaseInputDirectly({ native: nativeInput, keyIds, buttonIds, onError: log })
   }
 
   // -------------------------------------------------------------------------
@@ -535,6 +523,27 @@ async function bootstrap(): Promise<void> {
     window.webContents.on('did-finish-load', () => {
       if (recovery.releasedCount > 0) {
         emit('recoveryNotice', { count: recovery.releasedCount })
+      } else if (recovery.outcome === 'replay-failed' && recovery.message !== null) {
+        // The one outcome where keys really may still be physically down is the
+        // one the notice channel cannot express: `RecoveryNotice` carries a
+        // released count and nothing else, and a count of 0 renders as "0 keys
+        // were still down. They have been released", which is the opposite of
+        // the truth. Until that payload is widened to carry the outcome, this
+        // is said in the only surface main owns outright, rather than left in
+        // the log where the user will never see it. A sheet on our own window,
+        // so it cannot block anything else the user is doing.
+        void dialog
+          .showMessageBox(window, {
+            type: 'warning',
+            title: 'Some keys may still be held',
+            message: 'Some keys may still be held',
+            detail: recovery.message,
+            buttons: ['OK'],
+            noLink: true,
+          })
+          .catch((error: unknown) => {
+            log('could not show the failed-recovery notice', error)
+          })
       }
       emit('permissionsChanged', permissionView())
       emit('sessionState', withFocus(controller.getState()))

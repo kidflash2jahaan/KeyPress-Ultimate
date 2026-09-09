@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { FOCUS_SETTLE_MS, MODIFIER_CLEAR_TIMEOUT_MS } from '@shared/ipc'
+import { FOCUS_SETTLE_MS, FOCUS_TICK_MS, MODIFIER_CLEAR_TIMEOUT_MS } from '@shared/ipc'
 import type { AppInfo, KeyDef, MouseDef, SessionConfig, Settings } from '@shared/types'
-import type { HoldLoopState, InjectorNative } from './hold-loop'
+import type { ForegroundBlockingReport } from './native/windows'
+import type { BlockedTargetEvent, HoldLoopState, InjectorNative } from './hold-loop'
 import {
   computeTickPeriodMs,
   createHoldLoop,
   REPEAT_INTERVAL_DEFAULT_MS,
   TAP_INTERVAL_MAX_MS,
+  TARGET_IDENTITY_RECHECK_MS,
 } from './hold-loop'
 import type { Clock, TimerHandle } from './scheduler'
 
@@ -69,6 +71,7 @@ type OpName =
   | 'endHighResolutionTimers'
   | 'dispose'
   | 'applySettings'
+  | 'describeForegroundBlocking'
 
 interface Op {
   op: OpName
@@ -86,6 +89,8 @@ interface FakeNative {
   setFrontmost(pid: number | null): void
   setApps(apps: AppInfo[]): void
   setModifiersClear(clear: boolean): void
+  setBlockingReport(report: ForegroundBlockingReport): void
+  throwOnListApplications(shouldThrow: boolean): void
   modifierGateCalls: { at: number }[]
   reset(): void
 }
@@ -109,6 +114,32 @@ const OUR_APP: AppInfo = {
   path: null,
 }
 
+const NOT_ELEVATED = {
+  state: 'known-not-elevated',
+  lastError: null,
+  reason: 'the token reports not elevated',
+} as const
+
+/** What the Windows adapter answers when injection is expected to land. */
+const REACHABLE_REPORT: ForegroundBlockingReport = {
+  ok: true,
+  severity: 'ok',
+  app: MINECRAFT,
+  self: NOT_ELEVATED,
+  target: NOT_ELEVATED,
+  message: 'Minecraft looks reachable.',
+}
+
+/** UIPI: the target runs elevated and we do not, so nothing we post arrives. */
+const ELEVATED_REPORT: ForegroundBlockingReport = {
+  ok: false,
+  severity: 'blocked',
+  app: MINECRAFT,
+  self: NOT_ELEVATED,
+  target: { state: 'known-elevated', lastError: null, reason: 'the token reports elevated' },
+  message: 'Minecraft is running as administrator, restart KeyPress Ultimate as administrator.',
+}
+
 const INPUT_OPS: readonly OpName[] = [
   'keyDown',
   'keyDownRepeat',
@@ -128,6 +159,8 @@ function createFakeNative(
   let frontmost: number | null = MINECRAFT.pid
   let apps: AppInfo[] = [MINECRAFT, TERMINAL, OUR_APP]
   let modifiersClear = true
+  let blockingReport: ForegroundBlockingReport = REACHABLE_REPORT
+  let listApplicationsThrows = false
 
   const record = (op: OpName, id?: string, pid?: number): void => {
     ops.push({ op, id, pid, at: clock.now() })
@@ -137,6 +170,7 @@ function createFakeNative(
     async init(): Promise<void> {},
     listApplications(): AppInfo[] {
       record('listApplications')
+      if (listApplicationsThrows) throw new Error('the window server is not answering')
       return apps
     },
     getFrontmostPid(): number | null {
@@ -187,6 +221,10 @@ function createFakeNative(
     applySettings(): void {
       record('applySettings')
     },
+    describeForegroundBlocking(): ForegroundBlockingReport {
+      record('describeForegroundBlocking')
+      return blockingReport
+    },
   }
 
   const native = (withExtensions ? { ...base, ...extensions } : base) as InjectorNative
@@ -204,6 +242,12 @@ function createFakeNative(
     },
     setModifiersClear: (clear) => {
       modifiersClear = clear
+    },
+    setBlockingReport: (report) => {
+      blockingReport = report
+    },
+    throwOnListApplications: (shouldThrow) => {
+      listApplicationsThrows = shouldThrow
     },
     modifierGateCalls,
     reset: () => {
@@ -225,6 +269,17 @@ function config(overrides: Partial<SessionConfig> = {}): SessionConfig {
   }
 }
 
+function settingsWith(overrides: Partial<Settings> = {}): Settings {
+  return {
+    theme: 'system',
+    panicHotkey: 'CommandOrControl+Alt+Shift+K',
+    maxSessionMinutes: 30,
+    autoCheckUpdates: true,
+    windowsUseVirtualKeys: false,
+    ...overrides,
+  }
+}
+
 const SETTLE_AND_GATE_MS = FOCUS_SETTLE_MS + 60
 
 interface Harness {
@@ -234,6 +289,8 @@ interface Harness {
   states: HoldLoopState[]
   errors: { code: string; message: string }[]
   released: { count: number; reason: string }[]
+  blocked: BlockedTargetEvent[]
+  selfDisarms: string[]
 }
 
 function harness(
@@ -248,6 +305,8 @@ function harness(
   const states: HoldLoopState[] = []
   const errors: { code: string; message: string }[] = []
   const released: { count: number; reason: string }[] = []
+  const blocked: BlockedTargetEvent[] = []
+  const selfDisarms: string[] = []
   const loop = createHoldLoop({
     native: fake.native,
     clock,
@@ -257,8 +316,10 @@ function harness(
     onState: (state) => states.push(state),
     onError: (code, message) => errors.push({ code, message }),
     onReleased: (count, reason) => released.push({ count, reason }),
+    onBlocked: (event) => blocked.push(event),
+    onSelfDisarm: (reason) => selfDisarms.push(reason),
   })
-  return { clock, fake, loop, states, errors, released }
+  return { clock, fake, loop, states, errors, released, blocked, selfDisarms }
 }
 
 // ---------------------------------------------------------------------------
@@ -776,5 +837,170 @@ describe('native failures', () => {
     expect(errors.length).toBeGreaterThan(0)
     expect(errors[0]).toContain('getFrontmostPid failed')
     loop.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+
+describe('self-disarm', () => {
+  // Regression: the loop can end its own session, but nothing said so. Main is
+  // the only owner of the session lifecycle, and the last state frame a
+  // self-disarm emits is indistinguishable from an ordinary focus loss, so main
+  // soft-released and stayed armed forever against a loop that had stopped
+  // ticking: a dead session that still counted up and still refused to fire.
+  it('announces a session the loop ended itself', () => {
+    const h = harness()
+    h.loop.applySettings(settingsWith({ maxSessionMinutes: 1 }))
+    h.loop.arm(config())
+    h.clock.advance(SETTLE_AND_GATE_MS)
+    expect(h.fake.count('keyDown')).toBe(1)
+    expect(h.selfDisarms).toEqual([])
+
+    h.clock.advance(61_000)
+    expect(h.selfDisarms).toEqual(['max-session-time'])
+    expect(h.loop.armed).toBe(false)
+    expect(h.fake.count('keyUp')).toBe(1)
+  })
+
+  it('stays quiet when the disarm is the one main asked for', () => {
+    const h = harness()
+    h.loop.arm(config())
+    h.clock.advance(SETTLE_AND_GATE_MS)
+    h.loop.disarm('user-stop')
+    expect(h.loop.armed).toBe(false)
+    // Main already knows: it is the one that asked.
+    expect(h.selfDisarms).toEqual([])
+
+    h.loop.releaseAll('panic-hotkey')
+    expect(h.selfDisarms).toEqual([])
+  })
+})
+
+describe('pid recycling', () => {
+  const IMPOSTOR: AppInfo = {
+    identity: 'com.example.impostor',
+    name: 'Impostor',
+    pid: MINECRAFT.pid,
+    path: null,
+  }
+
+  // Regression: the pid -> identity snapshot was trusted for a full second with
+  // no liveness check, and the pre-assert guard compared pid numbers only. On
+  // Windows a pid comes back off a free list within seconds, so the loop kept
+  // firing into whatever process inherited the number.
+  it('lets go when the pid it is pressing into becomes a different process', () => {
+    const h = harness()
+    h.loop.arm(config())
+    h.clock.advance(SETTLE_AND_GATE_MS)
+    expect(h.fake.count('keyDown')).toBe(1)
+
+    // The game exits, its pid is reissued, and the new owner is frontmost. The
+    // number in `getFrontmostPid()` never changes.
+    h.fake.setApps([IMPOSTOR, TERMINAL, OUR_APP])
+    h.clock.advance(TARGET_IDENTITY_RECHECK_MS + FOCUS_TICK_MS)
+
+    expect(h.fake.count('keyUp')).toBe(1)
+    expect(h.loop.state.phase).toBe('armed-waiting')
+
+    // And it does not start pressing into the impostor either.
+    h.fake.reset()
+    h.clock.advance(5_000)
+    expect(h.fake.inputOps()).toHaveLength(0)
+  })
+
+  it('stops the repeat asserts too, not just the hold', () => {
+    const h = harness()
+    h.loop.arm(config({ mode: 'hold-repeat', repeatInitialMs: 0, repeatIntervalMs: 33 }))
+    h.clock.advance(SETTLE_AND_GATE_MS + 200)
+    expect(h.fake.count('keyDownRepeat')).toBeGreaterThan(0)
+
+    h.fake.setApps([IMPOSTOR, TERMINAL, OUR_APP])
+    h.clock.advance(TARGET_IDENTITY_RECHECK_MS + FOCUS_TICK_MS)
+    h.fake.reset()
+    h.clock.advance(1_000)
+    expect(h.fake.inputOps()).toHaveLength(0)
+  })
+
+  it('keeps holding when the same pid is still the same process', () => {
+    const h = harness()
+    h.loop.arm(config())
+    h.clock.advance(SETTLE_AND_GATE_MS)
+    expect(h.fake.count('keyDown')).toBe(1)
+
+    h.clock.advance(10_000)
+    expect(h.fake.count('keyUp')).toBe(0)
+    expect(h.loop.state.phase).toBe('firing')
+  })
+
+  it('keeps holding when the identity snapshot cannot be rebuilt', () => {
+    const h = harness()
+    h.loop.arm(config())
+    h.clock.advance(SETTLE_AND_GATE_MS)
+    expect(h.fake.count('keyDown')).toBe(1)
+
+    // A native failure is not evidence the target died, so it must not be
+    // treated as one. The error is reported, the hold survives.
+    h.fake.throwOnListApplications(true)
+    h.clock.advance(2_000)
+    expect(h.fake.count('keyUp')).toBe(0)
+    expect(h.errors.some((error) => error.message.includes('listApplications'))).toBe(true)
+  })
+})
+
+describe('blocked targets', () => {
+  it('reports an elevated target once, not once per tick', () => {
+    const h = harness({ platform: 'win32' })
+    h.fake.setBlockingReport(ELEVATED_REPORT)
+    h.loop.arm(config())
+    h.clock.advance(SETTLE_AND_GATE_MS)
+
+    expect(h.blocked).toEqual([
+      {
+        code: 'elevated-target',
+        message: ELEVATED_REPORT.message,
+        appName: 'Minecraft',
+      },
+    ])
+
+    h.clock.advance(30_000)
+    expect(h.blocked).toHaveLength(1)
+    expect(h.fake.count('describeForegroundBlocking')).toBe(1)
+  })
+
+  it('does not re-report the same target after focus flicks away and back', () => {
+    const h = harness({ platform: 'win32' })
+    h.fake.setBlockingReport(ELEVATED_REPORT)
+    h.loop.arm(config())
+    h.clock.advance(SETTLE_AND_GATE_MS)
+    expect(h.blocked).toHaveLength(1)
+
+    h.fake.setFrontmost(TERMINAL.pid)
+    h.clock.advance(200)
+    h.fake.setFrontmost(MINECRAFT.pid)
+    h.clock.advance(SETTLE_AND_GATE_MS)
+    expect(h.blocked).toHaveLength(1)
+  })
+
+  it('says nothing when the adapter reports the target is reachable', () => {
+    const h = harness({ platform: 'win32' })
+    h.loop.arm(config())
+    h.clock.advance(SETTLE_AND_GATE_MS + 5_000)
+    expect(h.blocked).toEqual([])
+  })
+
+  it('ignores a report about some other window', () => {
+    const h = harness({ platform: 'win32' })
+    h.fake.setBlockingReport({ ...ELEVATED_REPORT, app: TERMINAL })
+    h.loop.arm(config())
+    h.clock.advance(SETTLE_AND_GATE_MS)
+    expect(h.blocked).toEqual([])
+  })
+
+  it('is silent on an adapter that cannot answer the question', () => {
+    const h = harness({ platform: 'darwin', extensions: false })
+    h.loop.arm(config())
+    h.clock.advance(SETTLE_AND_GATE_MS + 1_000)
+    expect(h.fake.count('describeForegroundBlocking')).toBe(0)
+    expect(h.blocked).toEqual([])
   })
 })

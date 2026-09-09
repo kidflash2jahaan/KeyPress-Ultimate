@@ -25,6 +25,7 @@ import {
   PLATE_PAD_U,
   UNIT_MIN,
   computeLayout,
+  gapPx,
   neighborOf,
   rangeBetween,
   rowEnds,
@@ -155,8 +156,18 @@ export function Keyboard({
   // the first key, so Tab always lands somewhere sensible.
   const tabbableId = focusedId ?? layout.keys[0]?.key.id ?? null
 
+  /*
+   * `--gap` is written here beside `--u`, not inherited from :root.
+   *
+   * A custom property is substituted at computed-value time on the element
+   * that declares it, so a `--gap: calc(var(--u) * 0.09)` on :root resolves
+   * against :root's `--u` and inherits down as that fixed length. Every cap
+   * would then be sized with the plate's unit and gutted with the root's.
+   */
+  const boardUnit = Math.max(UNIT_MIN, unit)
   const plateStyle = {
-    '--u': `${Math.max(UNIT_MIN, unit)}px`,
+    '--u': `${boardUnit}px`,
+    '--gap': `${gapPx(boardUnit)}px`,
     '--plate-pad': PLATE_PAD_U,
     '--board-w': BOARD_WIDTH_U,
     '--board-h': BOARD_HEIGHT_U,

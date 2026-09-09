@@ -1775,14 +1775,14 @@
     "unitHeight": 1,
     "macKeyCode": null,
     "winVirtualKey": 19,
-    "winScanCode": 69,
+    "winScanCode": null,
     "winExtended": false,
     "isModifier": false,
     "holdable": true,
     "domCode": "Pause",
     "extra": false,
     "platformExclusive": "win",
-    "notes": "No macOS keycode. On Apple Extended layouts this physical position is F15. Real hardware sends the E1 1D 45 prefixed sequence which SendInput cannot express; use VK-based injection."
+    "notes": "No macOS keycode. On Apple Extended layouts this physical position is F15. Windows: the physical key emits the three-code sequence E1 1D 45, which one SendInput INPUT record cannot express, and a bare scan code 0x45 is VK_NUMLOCK in the kbdus scan-code table, so injecting it would toggle the user Num Lock instead of sending Pause. winScanCode is therefore null: encodeKey falls through to the virtual-key path and sends VK_PAUSE (0x13) directly, which is what this key has always needed. See docs/windows-testing-checklist.md R-04."
   },
   {
     "id": "key-insert",
@@ -2028,13 +2028,13 @@
     "macKeyCode": 71,
     "winVirtualKey": 144,
     "winScanCode": 69,
-    "winExtended": true,
+    "winExtended": false,
     "isModifier": false,
     "holdable": false,
     "domCode": "NumLock",
     "extra": false,
     "platformExclusive": null,
-    "notes": "Same physical position as Clear on Apple numpads; kVK_ANSI_KeypadClear = 0x47. Windows scancode 0x45 collides with Pause; the extended flag is what disambiguates NumLock from Pause when injecting scancodes. Lock key: not meaningful to hold."
+    "notes": "Same physical position as Clear on Apple numpads; kVK_ANSI_KeypadClear = 0x47. Windows: inject the BARE scan code 0x45 with no extended flag. kbdus maps ausVK[0x45] to VK_NUMLOCK | KBDEXT, so the driver sets the extended bit itself and lParam comes back as 0xE045; that reported value is what Chromium dom_code_data.inc records, and feeding it back into SendInput is wrong because the E0 scan-code table has no 0x45 entry and it would resolve to no virtual key at all. winExtended describes injection, not what Windows reports. Lock key: not meaningful to hold."
   },
   {
     "id": "numpad-divide",

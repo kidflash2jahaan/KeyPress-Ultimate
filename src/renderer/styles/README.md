@@ -100,22 +100,32 @@ border instead.
 | `--radius-1` | 3px. Inner faces, chips, tags. |
 | `--radius-2` | 6px. Keycaps, buttons, inputs. |
 | `--radius-3` | 10px. Plates, panels, sheets. |
-| `--keyboard-units` | 22.5, the width of a full-size 104 board in units. |
-| `--keyboard-inset` | Total horizontal padding of the keyboard band, both sides combined. |
 | `--space-1` … `--space-7` | 4, 8, 12, 16, 24, 32, 48px layout scale. Dense on purpose. |
 | `--press-travel` | How far a keycap travels when it fires. Zeroed under reduced motion. |
 | `--titlebar-height` | Height of the drag band. |
 | `--titlebar-lights-inset` | Leading clearance for the macOS traffic lights. Set to 0 on Windows. |
 
-`--u` is solved from the viewport rather than stepped at a breakpoint:
+`--u` and `--gap` are declared here only as a fallback. The board's real values are written onto
+`.plate` by `Keyboard.tsx`, from `unitForSpace()` in `components/keyboard-layout.ts`:
 
-```css
---u: clamp(30px, calc((100vw - var(--keyboard-inset)) / var(--keyboard-units)), 48px);
+```ts
+unitForSpace(bandWidthPx, bandHeightPx)  // clamped to [30, 64]
 ```
 
-It lands on exactly 48px at the 1180px default window, tapers continuously as the window narrows
-(about 44px at the 1100px minimum), and floors at 30px. Below the floor the keyboard band scrolls
-horizontally instead of shrinking further, because dual-legend keys stop being readable.
+Two things follow, and both were once wrong here.
+
+The unit is **solved, not stepped**, and it is solved from the band's **measured** box rather than
+from `100vw`. The band is not the window: it sits inside a border, a padding, and whatever the
+other bands leave. It lands on about 45px at the 1100px minimum window, grows past 48px when the
+window gives it room, caps at 64px (a real switch pitch is 19.05mm, or 72 CSS px at 96dpi), and
+floors at 30px. Below the floor the keyboard band scrolls inside itself rather than shrinking
+further, because dual-legend keys stop being readable.
+
+`--gap` **must be declared on the same element as the `--u` it refers to**. A custom property is
+substituted at computed-value time on the element that declares it, so a `--gap: calc(var(--u) *
+0.09)` written on `:root` resolves against `:root`'s `--u` and inherits down as a fixed length. The
+plate's own unit never reaches it, and every cap ends up sized with one unit and gutted with
+another.
 
 ### Motion
 
@@ -229,6 +239,12 @@ Measured on the shipped values, WCAG 2.x. Every pair below passes.
 | `--danger` on `--bg` | 5.06:1 | 6.50:1 | 4.5 |
 | `--sel-text` on `--sel` | 13.98:1 | 13.41:1 | 4.5 |
 | `--sig` on `--plate` | 3.20:1 | 9.06:1 | 3.0 (1.4.11) |
+
+`--sig` is a **graphical-object colour, never a text colour**. 3.20:1 clears 1.4.11 for a fill, a
+border or a glow, and misses the 4.5:1 that 1.4.3 asks of anything under 18.66px. The firing state
+is carried by the plate border, the filled dot, the glow ring and the one looping animation; the
+words stay `--text`. `styles/tokens.test.ts` fails the build if any stylesheet writes
+`color: var(--sig)`.
 | `--text` focus ring on any surface | 13.98:1 and up | 11.47:1 and up | 3.0 (1.4.11) |
 
 ### Values that were adjusted to get there

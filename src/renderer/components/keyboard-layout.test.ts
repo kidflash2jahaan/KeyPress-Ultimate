@@ -6,19 +6,24 @@ import {
   BOARD_WIDTH_U,
   NAVIGATION_X_U,
   NUMPAD_X_U,
+  PLATE_CHROME_PX,
   UNIT_COMPACT,
   UNIT_FULL,
+  UNIT_MAX,
   UNIT_MIN,
   accessibleName,
   boundingBox,
   capLegend,
   computeLayout,
   findOverlaps,
+  gapPx,
   neighborOf,
+  plateHeightPx,
   plateWidthPx,
   rangeBetween,
   rowEnds,
   rowIdOf,
+  unitForSpace,
   unitForWidth,
   withPlatformLabels,
 } from './keyboard-layout'
@@ -179,21 +184,87 @@ describe('computeLayout', () => {
   })
 })
 
-describe('unitForWidth', () => {
-  it('uses the full unit only when the whole plate fits', () => {
-    expect(unitForWidth(plateWidthPx(UNIT_FULL))).toBe(UNIT_FULL)
-    expect(unitForWidth(plateWidthPx(UNIT_FULL) + 400)).toBe(UNIT_FULL)
+/**
+ * The keyboard band's own box at a given window width: the window less the
+ * .main border (2px each side) and the .board padding (20px each side).
+ */
+function boardBandWidth(windowWidth: number): number {
+  return windowWidth - 4 - 40
+}
+
+/** The three window sizes this layout is checked against. */
+const WINDOWS = [
+  { name: 'the 1100px minimum window', width: 1100 },
+  { name: 'a 1280px window', width: 1280 },
+  { name: 'a 1512px window', width: 1512 },
+] as const
+
+describe('unitForSpace', () => {
+  it('solves the unit instead of stepping it down a cliff', () => {
+    // One pixel short of a full-size plate used to cost 14px of unit: a 29%
+    // cut to answer a 0.1% shortfall. It must now cost about one pixel.
+    const exact = unitForSpace(plateWidthPx(UNIT_FULL) + PLATE_CHROME_PX)
+    const short = unitForSpace(plateWidthPx(UNIT_FULL) + PLATE_CHROME_PX - 1)
+    expect(exact).toBeCloseTo(UNIT_FULL, 5)
+    expect(exact - short).toBeLessThan(0.1)
   })
 
-  it('steps down to compact rather than shrinking the full size', () => {
-    expect(unitForWidth(plateWidthPx(UNIT_FULL) - 1)).toBe(UNIT_COMPACT)
-    expect(unitForWidth(plateWidthPx(UNIT_COMPACT))).toBe(UNIT_COMPACT)
+  it('keeps a readable unit at the 1100px minimum window', () => {
+    // The spec rejects any layout that lands on UNIT_COMPACT here, because a
+    // dual-legend cap at 34px is not readable. styles/README.md promises
+    // "about 44px at the 1100px minimum window".
+    const unit = unitForSpace(boardBandWidth(1100))
+    expect(unit).toBeGreaterThan(44)
+    expect(unit).toBeGreaterThan(UNIT_COMPACT)
   })
 
-  it('floors at the minimum unit instead of shrinking further', () => {
-    expect(unitForWidth(plateWidthPx(UNIT_COMPACT) - 1)).toBe(UNIT_MIN)
-    expect(unitForWidth(200)).toBe(UNIT_MIN)
-    expect(unitForWidth(0)).toBe(UNIT_MIN)
+  it.each(WINDOWS)('fills the width of the band at $name', ({ width }) => {
+    const band = boardBandWidth(width)
+    // A generous height, so this measures the width solve alone.
+    const unit = unitForSpace(band, 2000)
+    expect(plateWidthPx(unit) + PLATE_CHROME_PX).toBeGreaterThan(band * 0.95)
+    expect(plateWidthPx(unit) + PLATE_CHROME_PX).toBeLessThanOrEqual(band)
+  })
+
+  it('grows past the default desktop unit when the band is wider', () => {
+    expect(unitForSpace(boardBandWidth(1512), 2000)).toBeGreaterThan(UNIT_FULL)
+  })
+
+  it('caps at the comfortable maximum rather than growing without end', () => {
+    expect(unitForSpace(100_000, 100_000)).toBe(UNIT_MAX)
+  })
+
+  it('solves the height too, so the plate never overflows its band', () => {
+    for (const height of [240, 300, 360, 420]) {
+      const unit = unitForSpace(4000, height)
+      expect(plateHeightPx(unit) + PLATE_CHROME_PX).toBeLessThanOrEqual(height)
+    }
+  })
+
+  it('takes whichever axis binds first', () => {
+    expect(unitForSpace(1000, 4000)).toBeCloseTo(unitForSpace(1000), 5)
+    expect(unitForSpace(4000, 300)).toBeLessThan(unitForSpace(4000, 3000))
+  })
+
+  it('floors at the minimum unit instead of shrinking the legends further', () => {
+    expect(unitForSpace(200)).toBe(UNIT_MIN)
+    expect(unitForSpace(0)).toBe(UNIT_MIN)
+    expect(unitForSpace(4000, 0)).toBe(UNIT_MIN)
+    expect(unitForSpace(Number.NaN)).toBe(UNIT_MIN)
+  })
+
+  it('is what unitForWidth solves when no height is known', () => {
+    expect(unitForWidth(1056)).toBe(unitForSpace(1056))
+  })
+})
+
+describe('gapPx', () => {
+  it('is 0.09 of the unit it is given, not of some other unit', () => {
+    // The bug this guards: --gap was declared on :root against the viewport
+    // clamp, so a plate at 34px still gutted its caps as if it were 44.6px.
+    expect(gapPx(34)).toBeCloseTo(3.06, 5)
+    expect(gapPx(48)).toBeCloseTo(4.32, 5)
+    expect(gapPx(UNIT_MIN)).toBeCloseTo(2.7, 5)
   })
 })
 
