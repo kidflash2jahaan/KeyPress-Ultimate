@@ -1,6 +1,6 @@
 {
   "name": "keypress-ultimate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Holds keyboard keys and mouse buttons down, but only while a chosen app is frontmost.",
   "author": "Jahaan Pardhanani",

@@ -30,6 +30,16 @@ export interface FocusWatcherDeps {
   native: FrontmostSource
   /** Resolves a pid to a real app. Omit and the watcher reports pids only. */
   registry?: Pick<AppRegistry, 'findByPid'>
+  /**
+   * Us. The registry deliberately excludes our own app so it can never be
+   * targeted, but the focus readout still has to be able to NAME us: when our
+   * own window is frontmost the strip should say "KeyPress Ultimate", not
+   * "Unknown", because "Unknown" reads as the app being broken at the exact
+   * moment it is working correctly and deliberately holding nothing.
+   */
+  selfApp?: AppInfo | null
+  /** Our process ids, matched against the frontmost pid to recognise ourselves. */
+  selfPids?: readonly number[]
   intervalMs?: number
   scheduler?: Scheduler
 }
@@ -70,8 +80,14 @@ export function createFocusWatcher(deps: FocusWatcherDeps): FocusWatcher {
     }
   }
 
+  const selfPids = new Set<number>(deps.selfPids ?? [])
+
   function resolve(pid: number | null): AppInfo | null {
-    if (pid === null || deps.registry === undefined) return null
+    if (pid === null) return null
+    // Us first: the registry excludes our own app by design, so asking it about
+    // our pid returns null and the UI would say "Unknown" about itself.
+    if (deps.selfApp != null && selfPids.has(pid)) return deps.selfApp
+    if (deps.registry === undefined) return null
     try {
       return deps.registry.findByPid(pid)
     } catch {

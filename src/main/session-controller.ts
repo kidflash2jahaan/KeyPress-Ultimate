@@ -1187,9 +1187,20 @@ function requireElectron(): Record<string, unknown> {
  * Both `index.ts` and `entry.ts` are inputs to electron-vite's `main` build, so
  * the built injector sits next to the built main bundle as `injector.js`.
  */
-export function defaultInjectorPath(): string {
-  const dir = (globalThis as { __dirname?: string }).__dirname
-  if (typeof dir !== 'string') {
+export function moduleDirname(): string | undefined {
+  // CommonJS gives every module its own `__dirname` BINDING. It is not a
+  // property of globalThis, so `globalThis.__dirname` is undefined in the
+  // packaged main process. Reading it there meant defaultInjectorPath() threw
+  // on every launch, the fork failed, and the app reported "could not start its
+  // input process" with no way to ever start one.
+  //
+  // `typeof` on an undeclared identifier is legal and does not throw, so this
+  // also stays correct under ESM (vitest), where it reports no __dirname.
+  return typeof __dirname === 'string' ? __dirname : undefined
+}
+
+export function defaultInjectorPath(dir: string | undefined = moduleDirname()): string {
+  if (typeof dir !== 'string' || dir.length === 0) {
     throw new Error('cannot resolve the injector path outside the packaged main process')
   }
   return join(dir, 'injector.js')

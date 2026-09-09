@@ -206,6 +206,17 @@ async function bootstrap(): Promise<void> {
       getFrontmostPid: () => (nativeInput === null ? null : nativeInput.getFrontmostPid()),
     },
     registry,
+    // The registry excludes us so we can never be targeted; the focus readout
+    // still needs to name us, or the strip says "Unknown" about this very app.
+    selfApp: {
+      // Same identity rule the registry uses, so "is this us?" answers
+      // identically on both sides.
+      identity: currentPlatform() === 'darwin' ? APP_ID : app.getPath('exe'),
+      name: app.getName(),
+      pid: process.pid,
+      path: app.getPath('exe'),
+    },
+    selfPids: [process.pid],
   })
 
   /**
