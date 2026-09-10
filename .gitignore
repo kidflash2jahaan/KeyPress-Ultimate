@@ -6,3 +6,8 @@ coverage/
 .DS_Store
 *.log
 .vite/
+
+# Guard: `asar extract-file` writes to the CWD using the basename and ignores
+# its destination argument, which once dropped a built bundle in the repo root.
+/index.js
+/chunks/
