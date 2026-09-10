@@ -178,10 +178,10 @@ const FAKE_UPDATE: UpdateInfo = {
     'Release ordering now puts modifiers last, so a held Shift can no longer outlive the key it was modifying.\n' +
     'Focus changes settle for 150ms before the first press, which stops a Cmd+Tab from turning a held W into Cmd+W.\n' +
     'Windows: scancode injection is the default, with a virtual-key fallback in Settings for titles that ignore scancodes.',
-  url: 'https://github.com/keypressultimate/keypress-ultimate/releases/tag/v0.2.0',
+  url: 'https://github.com/kidflash2jahaan/KeyPress-Ultimate/releases/tag/v0.2.0',
   assetName: 'KeyPress-Ultimate-0.2.0-universal.dmg',
   assetUrl:
-    'https://github.com/keypressultimate/keypress-ultimate/releases/download/v0.2.0/KeyPress-Ultimate-0.2.0-universal.dmg',
+    'https://github.com/kidflash2jahaan/KeyPress-Ultimate/releases/download/v0.2.0/KeyPress-Ultimate-0.2.0-universal.dmg',
   sha256: '9f2c1b0a4d7e6835c1f0a9b2d4e6f8071a3b5c7d9e0f2a4b6c8d0e2f4a6b8c0d',
   sizeBytes: 128_450_560,
 }

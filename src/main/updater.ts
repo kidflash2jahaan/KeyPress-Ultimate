@@ -43,7 +43,7 @@ import type { UpdateInfo } from '@shared/types'
 // ---------------------------------------------------------------------------
 
 export const GITHUB_OWNER = 'kidflash2jahaan'
-export const GITHUB_REPO = 'keypress-ultimate'
+export const GITHUB_REPO = 'KeyPress-Ultimate'
 
 export const LATEST_RELEASE_API_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`
 

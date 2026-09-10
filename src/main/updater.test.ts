@@ -237,7 +237,7 @@ function releaseJson(over: Record<string, unknown> = {}): string {
     draft: false,
     prerelease: false,
     published_at: '2026-09-01T00:00:00Z',
-    html_url: 'https://github.com/kidflash2jahaan/keypress-ultimate/releases/tag/v1.2.0',
+    html_url: 'https://github.com/kidflash2jahaan/KeyPress-Ultimate/releases/tag/v1.2.0',
     assets: [macAsset(), winAsset()],
     ...over,
   })
@@ -250,12 +250,12 @@ function releaseJson(over: Record<string, unknown> = {}): string {
 describe('updater constants', () => {
   it('points at the real repo and nothing else', () => {
     expect(GITHUB_OWNER).toBe('kidflash2jahaan')
-    expect(GITHUB_REPO).toBe('keypress-ultimate')
+    expect(GITHUB_REPO).toBe('KeyPress-Ultimate')
     expect(LATEST_RELEASE_API_URL).toBe(
-      'https://api.github.com/repos/kidflash2jahaan/keypress-ultimate/releases/latest',
+      'https://api.github.com/repos/kidflash2jahaan/KeyPress-Ultimate/releases/latest',
     )
     expect(RELEASES_PAGE_URL).toBe(
-      'https://github.com/kidflash2jahaan/keypress-ultimate/releases/latest',
+      'https://github.com/kidflash2jahaan/KeyPress-Ultimate/releases/latest',
     )
   })
 })
@@ -789,7 +789,7 @@ function downloadableInfo(sha256: string | null = PAYLOAD_SHA) {
   return {
     version: '1.2.0',
     notes: 'notes',
-    url: 'https://github.com/kidflash2jahaan/keypress-ultimate/releases/tag/v1.2.0',
+    url: 'https://github.com/kidflash2jahaan/KeyPress-Ultimate/releases/tag/v1.2.0',
     assetName: 'KeyPress-Ultimate-1.2.0-universal-mac.zip',
     assetUrl: 'https://downloads.test/mac.zip',
     sha256,
