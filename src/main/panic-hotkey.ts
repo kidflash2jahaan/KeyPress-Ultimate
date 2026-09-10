@@ -23,6 +23,7 @@
  *      the app's whole lifetime is rude and unnecessary.
  */
 import type { GlobalShortcut } from 'electron'
+import { requireOrThrow } from './cjs-require'
 import { getKeyById, platformLabel } from '@shared/keys'
 import type { Platform } from '@shared/types'
 
@@ -398,13 +399,7 @@ export function formatAcceleratorForPlatform(accelerator: string, platform: Plat
 }
 
 function loadElectronGlobalShortcut(): GlobalShortcutLike {
-  const req = (globalThis as { require?: (id: string) => unknown }).require
-  if (typeof req !== 'function') {
-    throw new Error(
-      'PanicHotkey needs an injected globalShortcut outside the Electron main process',
-    )
-  }
-  const electron = req('electron') as { globalShortcut?: GlobalShortcut }
+  const electron = requireOrThrow('electron', 'PanicHotkey') as { globalShortcut?: GlobalShortcut }
   const shortcuts = electron.globalShortcut
   if (shortcuts === undefined) {
     throw new Error('electron.globalShortcut is unavailable')

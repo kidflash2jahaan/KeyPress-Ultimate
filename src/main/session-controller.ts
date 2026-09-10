@@ -30,6 +30,7 @@
  * implementation, so the entire module runs under vitest against fakes.
  */
 import { join } from 'node:path'
+import { cjsDirname, requireOrThrow } from './cjs-require'
 import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_TIMEOUT_MS,
@@ -1176,11 +1177,7 @@ function unconfirmedFallbackMessage(): string {
 // ---------------------------------------------------------------------------
 
 function requireElectron(): Record<string, unknown> {
-  const req = (globalThis as { require?: (id: string) => unknown }).require
-  if (typeof req !== 'function') {
-    throw new Error('SessionController needs injected dependencies outside the Electron main process')
-  }
-  return req('electron') as Record<string, unknown>
+  return requireOrThrow('electron', 'SessionController')
 }
 
 /**
@@ -1196,7 +1193,7 @@ export function moduleDirname(): string | undefined {
   //
   // `typeof` on an undeclared identifier is legal and does not throw, so this
   // also stays correct under ESM (vitest), where it reports no __dirname.
-  return typeof __dirname === 'string' ? __dirname : undefined
+  return cjsDirname()
 }
 
 export function defaultInjectorPath(dir: string | undefined = moduleDirname()): string {
